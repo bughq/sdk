@@ -26,7 +26,10 @@ export function init(config: ServerConfig): BugHQClient {
   client = new BugHQClient({
     ...config,
     framework: config.framework ?? 'stacks',
+    sdkName: config.sdkName ?? 'bughq.stx.server',
     userAgent: config.userAgent ?? '@bughq/stx (+server; Bun)',
+    // No browser globals to instrument on the server.
+    autoInstrument: false,
   })
 
   if (config.captureUnhandled !== false && typeof process !== 'undefined' && process.on) {

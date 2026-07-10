@@ -12,8 +12,8 @@
  * ```
  */
 import type { App, Plugin } from 'vue'
-import type { BugHQClient, BugHQConfig } from '@bughq/sdk'
-import { captureException, captureMessage, getClient, init, setUser } from '@bughq/sdk'
+import type { Breadcrumb, BugHQClient, BugHQConfig, BugHQUser } from '@bughq/sdk'
+import { addBreadcrumb, captureException, captureMessage, getClient, init, setContext, setTag, setUser } from '@bughq/sdk'
 import { inject } from 'vue'
 
 export * from '@bughq/sdk'
@@ -29,7 +29,10 @@ export interface BugHQVue {
   client: BugHQClient
   captureException: (err: unknown, extra?: Record<string, unknown>) => void
   captureMessage: BugHQClient['captureMessage']
-  setUser: BugHQClient['setUser']
+  addBreadcrumb: (crumb: Breadcrumb) => void
+  setUser: (user: BugHQUser | null) => void
+  setTag: (key: string, value: string) => void
+  setContext: (name: string, context: Record<string, unknown> | null) => void
 }
 
 const INJECTION_KEY = '__bughq__'
@@ -39,7 +42,10 @@ function makeApi(client: BugHQClient): BugHQVue {
     client,
     captureException: (err, extra) => client.captureException(err, extra),
     captureMessage: (message, level, extra) => client.captureMessage(message, level, extra),
+    addBreadcrumb: crumb => client.addBreadcrumb(crumb),
     setUser: user => client.setUser(user),
+    setTag: (key, value) => client.setTag(key, value),
+    setContext: (name, context) => client.setContext(name, context),
   }
 }
 
@@ -47,7 +53,20 @@ function makeApi(client: BugHQClient): BugHQVue {
 export function createBugHQ(options: BugHQVueOptions): Plugin {
   return {
     install(app: App) {
-      const client = init({ ...options, framework: options.framework ?? 'vue' })
+      const client = init({
+        ...options,
+        framework: options.framework ?? 'vue',
+        sdkName: options.sdkName ?? 'bughq.vue',
+      })
+
+      // Record component mount/route intent as a breadcrumb where a router is
+      // present, so the trail leading to a component error has navigation context.
+      const router = (app.config.globalProperties as any)?.$router
+      if (router && typeof router.afterEach === 'function') {
+        router.afterEach((to: any) => {
+          client.addBreadcrumb({ type: 'navigation', category: 'vue-router', message: to?.fullPath ?? to?.path, data: { name: to?.name } })
+        })
+      }
 
       if (options.attachErrorHandler !== false) {
         const previous = app.config.errorHandler
@@ -64,6 +83,20 @@ export function createBugHQ(options: BugHQVueOptions): Plugin {
           if (typeof previous === 'function')
             previous(err, instance, info)
         }
+      }
+
+      // Vue's warn handler is dev-only, but surfacing warnings as breadcrumbs
+      // helps explain the state an error was thrown from.
+      const previousWarn = app.config.warnHandler
+      app.config.warnHandler = (msg, instance, trace) => {
+        try {
+          client.addBreadcrumb({ type: 'default', category: 'vue.warn', level: 'warning', message: String(msg) })
+        }
+        catch {
+          // ignore
+        }
+        if (typeof previousWarn === 'function')
+          previousWarn(msg, instance, trace)
       }
 
       const api = makeApi(client)
@@ -91,7 +124,10 @@ export function useBugHQ(): BugHQVue {
     client: getClient() as BugHQClient,
     captureException,
     captureMessage,
+    addBreadcrumb,
     setUser,
+    setTag,
+    setContext,
   }
 }
 

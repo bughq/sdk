@@ -16,10 +16,19 @@ export default defineNitroPlugin((nitroApp: any) => {
   const client = new BugHQClient({
     ...config,
     framework: 'nuxt-server',
+    sdkName: config.sdkName ? `${config.sdkName}.server` : 'bughq.nuxt.server',
     userAgent: 'bughq-nuxt (+server)',
+    // Server has no window/DOM to instrument; skip browser breadcrumb hooks.
+    autoInstrument: false,
   })
 
-  nitroApp.hooks.hook('error', (error: unknown) => {
-    client.captureException(error, { side: 'server' })
+  nitroApp.hooks.hook('error', (error: unknown, ctx: any) => {
+    const event = ctx?.event
+    const req = event?.node?.req
+    client.captureException(error, {
+      side: 'server',
+      method: req?.method,
+      path: req?.url,
+    })
   })
 })
