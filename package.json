@@ -1,0 +1,30 @@
+{
+  "name": "@bughq/monorepo",
+  "type": "module",
+  "version": "0.1.0",
+  "private": true,
+  "description": "bughq error-tracking SDKs — core, Vue, Nuxt, and Stacks/stx",
+  "author": "bughq",
+  "license": "MIT",
+  "homepage": "https://bughq.org",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/bughq/sdk.git"
+  },
+  "bugs": {
+    "url": "https://github.com/bughq/sdk/issues"
+  },
+  "workspaces": ["packages/*"],
+  "scripts": {
+    "build": "bun run scripts/build.ts",
+    "test": "bun run scripts/build.ts && bun test",
+    "publish:packages": "bun run scripts/build.ts && bun run scripts/publish.ts"
+  },
+  "devDependencies": {
+    "@nuxt/kit": "^3.14.0",
+    "@types/node": "^22.10.2",
+    "tsup": "^8.3.5",
+    "typescript": "^5.7.2",
+    "vue": "^3.5.13"
+  }
+}
