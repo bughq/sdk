@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test'
-import { BugHQClient, init, parseDsn, parseUserAgent } from '../src/index'
+import { BugHQClient, init, parseDsn, parseUserAgent, SDK_NAME } from '../src/index'
 
 // Capture outgoing requests by stubbing global fetch.
 let calls: Array<{ url: string, options: any }>
@@ -17,6 +17,10 @@ beforeEach(() => {
 afterEach(() => restoreFetch())
 
 const cfg = { project: 'demo', key: 'k_123', host: 'http://localhost:3108', dedupeMs: 0 }
+
+function lastBody(): any {
+  return JSON.parse(calls[calls.length - 1].options.body)
+}
 
 describe('parseDsn', () => {
   test('parses key@host/project', () => {
@@ -106,5 +110,109 @@ describe('BugHQClient', () => {
 
   test('init() returns a client and does not throw without a window', () => {
     expect(() => init(cfg)).not.toThrow()
+  })
+})
+
+describe('enrichment', () => {
+  test('rides along sdk metadata, a session, and runtime context', () => {
+    const c = new BugHQClient(cfg)
+    c.captureException(new Error('e'))
+    const body = lastBody()
+    expect(body.sdk.name).toBe(SDK_NAME)
+    expect(typeof body.sdk.version).toBe('string')
+    expect(typeof body.session.id).toBe('string')
+    expect(body.contexts.runtime.sdk).toBe(SDK_NAME)
+    expect(typeof body.timestamp).toBe('string')
+  })
+
+  test('framework plugins can override the sdk name', () => {
+    const c = new BugHQClient({ ...cfg, sdkName: 'bughq.vue', framework: 'vue' })
+    c.captureException(new Error('e'))
+    const body = lastBody()
+    expect(body.sdk.name).toBe('bughq.vue')
+    expect(body.contexts.runtime.framework).toBe('vue')
+  })
+
+  test('attaches recorded breadcrumbs (oldest first)', () => {
+    const c = new BugHQClient(cfg)
+    c.addBreadcrumb({ category: 'test', message: 'step 1' })
+    c.addBreadcrumb({ category: 'test', message: 'step 2' })
+    c.captureException(new Error('e'))
+    const body = lastBody()
+    expect(Array.isArray(body.breadcrumbs)).toBe(true)
+    expect(body.breadcrumbs.map((b: any) => b.message)).toEqual(['step 1', 'step 2'])
+  })
+
+  test('maxBreadcrumbs caps the ring buffer, evicting oldest', () => {
+    const c = new BugHQClient({ ...cfg, maxBreadcrumbs: 2 })
+    c.addBreadcrumb({ message: 'a' })
+    c.addBreadcrumb({ message: 'b' })
+    c.addBreadcrumb({ message: 'c' })
+    c.captureException(new Error('e'))
+    expect(lastBody().breadcrumbs.map((b: any) => b.message)).toEqual(['b', 'c'])
+  })
+
+  test('beforeBreadcrumb can drop breadcrumbs', () => {
+    const c = new BugHQClient({ ...cfg, beforeBreadcrumb: b => (b.category === 'secret' ? null : b) })
+    c.addBreadcrumb({ category: 'secret', message: 'x' })
+    c.addBreadcrumb({ category: 'ok', message: 'y' })
+    c.captureException(new Error('e'))
+    const msgs = lastBody().breadcrumbs.map((b: any) => b.message)
+    expect(msgs).toContain('y')
+    expect(msgs).not.toContain('x')
+  })
+
+  test('tags, user, and named contexts ride along', () => {
+    const c = new BugHQClient({ ...cfg, initialTags: { region: 'us' } })
+    c.setTag('plan', 'pro')
+    c.setUser({ id: 7, email: 'a@b.co' })
+    c.setContext('order', { id: 'ord_1', total: 42 })
+    c.captureException(new Error('e'))
+    const body = lastBody()
+    expect(body.tags.plan).toBe('pro')
+    expect(body.tags.region).toBe('us')
+    expect(body.user.id).toBe(7)
+    expect(body.contexts.order.id).toBe('ord_1')
+  })
+
+  test('setLevel overrides the event level', () => {
+    const c = new BugHQClient(cfg)
+    c.setLevel('fatal')
+    c.captureException(new Error('e'))
+    expect(lastBody().level).toBe('fatal')
+  })
+
+  test('setFingerprint sends a grouping override', () => {
+    const c = new BugHQClient(cfg)
+    c.setFingerprint(['checkout', 'timeout'])
+    c.captureException(new Error('e'))
+    expect(lastBody().fingerprint).toEqual(['checkout', 'timeout'])
+  })
+})
+
+describe('filtering', () => {
+  test('ignoreErrors drops matching events (string + regexp)', () => {
+    const c = new BugHQClient({ ...cfg, ignoreErrors: ['ResizeObserver', /chunk/i] })
+    c.captureException(new Error('ResizeObserver loop limit exceeded'))
+    c.captureException(new Error('Loading CHUNK 3 failed'))
+    expect(calls).toHaveLength(0)
+  })
+
+  test('ignoreErrors lets through non-matching events', () => {
+    const c = new BugHQClient({ ...cfg, ignoreErrors: ['ResizeObserver'] })
+    c.captureException(new Error('real bug'))
+    expect(calls).toHaveLength(1)
+  })
+
+  test('allowUrls restricts by locus (url + stack)', () => {
+    const c = new BugHQClient({ ...cfg, allowUrls: ['this-will-not-match-anything-xyz'] })
+    c.captureException(new Error('e'))
+    expect(calls).toHaveLength(0)
+  })
+
+  test('denyUrls drops events whose stack matches', () => {
+    const c = new BugHQClient({ ...cfg, denyUrls: [/sdk\.test/] })
+    c.captureException(new Error('from the test file'))
+    expect(calls).toHaveLength(0)
   })
 })
