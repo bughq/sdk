@@ -1,3 +1,4 @@
+/* eslint-disable no-console -- publish script logs progress to stdout */
 import { $ } from 'bun'
 
 // Publish in dependency order (sdk before the framework packages). `bun publish`

@@ -18,11 +18,18 @@
   "scripts": {
     "build": "bun run scripts/build.ts",
     "test": "bun run scripts/build.ts && bun test",
+    "lint": "bunx --bun pickier .",
+    "lint:fix": "bunx --bun pickier . --fix",
+    "format": "bunx --bun pickier . --format",
+    "format:fix": "bunx --bun pickier . --format --write",
+    "typecheck": "bunx --bun tsc --noEmit",
     "publish:packages": "bun run scripts/build.ts && bun run scripts/publish.ts"
   },
   "devDependencies": {
     "@nuxt/kit": "^3.14.0",
+    "@types/bun": "^1.1.14",
     "@types/node": "^22.10.2",
+    "pickier": "^0.1.38",
     "tsup": "^8.3.5",
     "typescript": "^5.7.2",
     "vue": "^3.5.13"
