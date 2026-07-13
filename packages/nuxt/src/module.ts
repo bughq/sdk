@@ -30,7 +30,8 @@ export default defineNuxtModule<ModuleOptions>({
     compatibility: { nuxt: '>=3.0.0' },
   },
   defaults: {
-    host: 'https://bughq.org',
+    // TEMPORARY: local-dev phase; switch back to 'https://bughq.org' at launch.
+    host: 'http://localhost:3108',
     environment: 'production',
   },
   setup(options, nuxt) {

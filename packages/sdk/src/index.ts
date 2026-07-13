@@ -93,7 +93,7 @@ export interface BugHQConfig {
   project?: string
   /** Public ingest key. Or provide `dsn`. */
   key?: string
-  /** Ingest host. Default `https://bughq.org`. */
+  /** Ingest host. Defaults to the bughq ingest (localhost during the local-dev phase). */
   host?: string
   /** A DSN encoding host+key+project: `https://<key>@<host>/<project>`. */
   dsn?: string
@@ -139,7 +139,9 @@ export interface BugHQConfig {
   beforeSend?: (event: BugHQEvent) => BugHQEvent | null | void
 }
 
-const DEFAULT_HOST = 'https://bughq.org'
+// TEMPORARY: local-dev phase — the SDK fires at the local bughq ingest.
+// Switch back to 'https://bughq.org' before publishing for real users.
+const DEFAULT_HOST = 'http://localhost:3108'
 
 interface Resolved {
   project: string

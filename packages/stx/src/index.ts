@@ -13,7 +13,7 @@ export { default } from './server'
 export interface SnippetOptions {
   project: string
   key: string
-  /** bughq host that serves /sdk.js. Default `https://bughq.org`. */
+  /** bughq host that serves /sdk.js (localhost during the local-dev phase). */
   host?: string
 }
 
@@ -30,6 +30,7 @@ export interface SnippetOptions {
  * ```
  */
 export function clientSnippet(options: SnippetOptions): string {
-  const host = (options.host ?? 'https://bughq.org').replace(/\/+$/, '')
+  // TEMPORARY: local-dev phase; switch back to 'https://bughq.org' at launch.
+  const host = (options.host ?? 'http://localhost:3108').replace(/\/+$/, '')
   return `<script src="${host}/sdk.js" data-project="${options.project}" data-key="${options.key}"></script>`
 }
