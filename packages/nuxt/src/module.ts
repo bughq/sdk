@@ -14,9 +14,14 @@
  * ```
  */
 import type { BugHQConfig } from '@bughq/sdk'
-import { addPlugin, addServerPlugin, createResolver, defineNuxtModule } from '@nuxt/kit'
+import { addImports, addPlugin, addServerPlugin, createResolver, defineNuxtModule } from '@nuxt/kit'
 
 export type ModuleOptions = BugHQConfig
+
+// Manual-capture helpers surfaced as Nuxt auto-imports, so any component,
+// composable, or server route can call `report(err)` / `captureException(err)`
+// without importing from '@bughq/sdk' first.
+const AUTO_IMPORTS = ['report', 'captureException', 'captureMessage', 'addBreadcrumb', 'setUser', 'setTag', 'setContext'] as const
 
 export default defineNuxtModule<ModuleOptions>({
   meta: {
@@ -37,5 +42,8 @@ export default defineNuxtModule<ModuleOptions>({
 
     addPlugin({ src: resolve('./runtime/plugin.client'), mode: 'client' })
     addServerPlugin(resolve('./runtime/nitro.server'))
+
+    // `report(err)` and friends become available everywhere with no import line.
+    addImports(AUTO_IMPORTS.map(name => ({ name, as: name, from: '@bughq/sdk' })))
   },
 })
