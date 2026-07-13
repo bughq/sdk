@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test'
-import { BugHQClient, init, parseDsn, parseUserAgent, SDK_NAME } from '../src/index'
+import { BugHQClient, captureException, close, init, parseDsn, parseUserAgent, report, SDK_NAME } from '../src/index'
 
 // Capture outgoing requests by stubbing global fetch.
 let calls: Array<{ url: string, options: any }>
@@ -62,6 +62,29 @@ describe('BugHQClient', () => {
     expect(body.message).toBe('boom at x')
     expect(body.level).toBe('error')
     expect(typeof body.stack).toBe('string')
+  })
+
+  test('report(error) captures an exception', async () => {
+    const c = new BugHQClient(cfg)
+    c.report(new TypeError('kaboom'))
+    await Promise.resolve()
+    expect(calls).toHaveLength(1)
+    const body = lastBody()
+    expect(body.type).toBe('TypeError')
+    expect(body.message).toBe('kaboom')
+    expect(body.level).toBe('error')
+  })
+
+  test('report(string) captures an error-level message', async () => {
+    const c = new BugHQClient(cfg)
+    c.report('checkout failed', { orderId: 42 })
+    await Promise.resolve()
+    expect(calls).toHaveLength(1)
+    const body = lastBody()
+    expect(body.type).toBe('Message')
+    expect(body.message).toBe('checkout failed')
+    expect(body.level).toBe('error')
+    expect(body.extra.orderId).toBe(42)
   })
 
   test('dedupes the same error (same site) within the window', () => {
@@ -213,6 +236,26 @@ describe('filtering', () => {
   test('denyUrls drops events whose stack matches', () => {
     const c = new BugHQClient({ ...cfg, denyUrls: [/sdk\.test/] })
     c.captureException(new Error('from the test file'))
+    expect(calls).toHaveLength(0)
+  })
+})
+
+describe('top-level report (default client)', () => {
+  afterEach(() => close())
+
+  test('routes through the initialized default client', async () => {
+    init(cfg)
+    report(new Error('top-level boom'))
+    await Promise.resolve()
+    expect(calls).toHaveLength(1)
+    expect(lastBody().message).toBe('top-level boom')
+  })
+
+  test('no-ops before init / after close', async () => {
+    close()
+    report(new Error('ignored'))
+    captureException(new Error('also ignored'))
+    await Promise.resolve()
     expect(calls).toHaveLength(0)
   })
 })

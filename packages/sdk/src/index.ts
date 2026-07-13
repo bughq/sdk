@@ -479,6 +479,17 @@ export class BugHQClient {
     this.dispatch({ type: errorType(err), message: errorMessage(err), stack: errorStack(err), level: 'error' }, extra)
   }
 
+  /**
+   * Ergonomic one-call reporting. Pass an Error (or anything thrown) to capture
+   * an exception, or a string to capture an error-level message.
+   */
+  report(error: unknown, extra?: Record<string, unknown>): void {
+    if (typeof error === 'string')
+      this.captureMessage(error, 'error', extra)
+    else
+      this.captureException(error, extra)
+  }
+
   private dispatch(base: { type: string, message: string, stack?: string, level: Level }, extra?: Record<string, unknown>): void {
     if (!this.config.enabled)
       return
@@ -913,6 +924,15 @@ export function captureMessage(message: string, level?: Level, extra?: Record<st
   defaultClient?.captureMessage(message, level, extra)
 }
 
+/**
+ * Ergonomic one-call reporting for the default client: `report(err)` captures
+ * an exception, `report('something broke')` captures an error-level message.
+ * The friendly entry point — `import { report } from '@bughq/sdk'`.
+ */
+export function report(error: unknown, extra?: Record<string, unknown>): void {
+  defaultClient?.report(error, extra)
+}
+
 export function addBreadcrumb(crumb: Breadcrumb): void {
   defaultClient?.addBreadcrumb(crumb)
 }
@@ -961,6 +981,7 @@ export function close(): void {
 /** The `bughq` object the marketing page advertises: `bughq.init({ dsn })`. */
 export const bughq = {
   init,
+  report,
   captureException,
   captureMessage,
   addBreadcrumb,
