@@ -1,4 +1,3 @@
-/* eslint-disable no-console -- publish script logs progress to stdout */
 import { $ } from 'bun'
 
 // Publish in dependency order (sdk before the framework packages). `bun publish`
@@ -6,8 +5,8 @@ import { $ } from 'bun'
 const order = ['sdk', 'vue', 'nuxt', 'stx']
 
 for (const name of order) {
-  console.log(`\n▸ publishing @bughq/${name}`)
+  console.info(`\n▸ publishing @bughq/${name}`)
   await $`bun publish --access public`.cwd(`packages/${name}`)
 }
 
-console.log('\n✓ published all packages')
+console.info('\n✓ published all packages')
