@@ -107,8 +107,15 @@ describe('BugHQClient', () => {
     expect(JSON.parse(calls[0].options.body).message).toBe('redacted')
   })
 
-  test('missing project/key disables capture', () => {
+  test('key alone enables capture (project optional, omitted from payload)', () => {
     const c = new BugHQClient({ key: 'k' } as any)
+    c.captureException(new Error('x'))
+    expect(calls).toHaveLength(1)
+    expect(JSON.parse(calls[0].options.body).project).toBeUndefined()
+  })
+
+  test('missing key disables capture', () => {
+    const c = new BugHQClient({ project: 'p' } as any)
     c.captureException(new Error('x'))
     expect(calls).toHaveLength(0)
   })

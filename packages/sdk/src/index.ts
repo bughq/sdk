@@ -50,7 +50,8 @@ export interface SdkInfo {
 
 /** The event payload POSTed to `/errors` (matches the ingest contract). */
 export interface BugHQEvent {
-  project: string
+  /** Optional: the ingest key alone identifies the project (globally unique). */
+  project?: string
   type: string
   message: string
   stack?: string
@@ -391,9 +392,11 @@ export class BugHQClient {
     if (config.initialTags)
       this.tags = { ...config.initialTags }
 
-    if (!this.config.project || !this.config.key) {
+    // The key is all that's required: it's globally unique, so the ingest
+    // resolves the project from it alone (Flare-style). `project` is optional.
+    if (!this.config.key) {
       if (this.config.debug)
-        console.warn('[bughq] missing project or key — capture disabled')
+        console.warn('[bughq] missing key — capture disabled')
       this.config.enabled = false
     }
     if (this.config.enabled) {
@@ -521,7 +524,8 @@ export class BugHQClient {
     const contexts = this.buildContexts()
 
     let event: BugHQEvent = {
-      project: this.config.project,
+      // Omitted when empty — the key resolves the project server-side.
+      project: this.config.project || undefined,
       type: base.type,
       message: base.message,
       stack: base.stack,
