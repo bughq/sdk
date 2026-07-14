@@ -11,5 +11,10 @@
     "skipLibCheck": true,
     "noEmit": true
   },
-  "include": ["packages/*/src", "packages/*/test", "scripts"]
+  "include": ["packages/*/src", "packages/*/test", "scripts"],
+  "exclude": [
+    "**/node_modules",
+    "**/dist",
+    "packages/nuxt/src/runtime"
+  ]
 }
