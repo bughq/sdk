@@ -1,7 +1,7 @@
 {
   "name": "@bughq/stx",
   "type": "module",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "bughq error tracking — Stacks / stx apps (client + server)",
   "license": "MIT",
   "homepage": "https://bughq.org",

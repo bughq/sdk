@@ -1,7 +1,7 @@
 {
   "name": "@bughq/sdk",
   "type": "module",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "bughq error tracking — framework-agnostic browser SDK",
   "license": "MIT",
   "homepage": "https://bughq.org",
