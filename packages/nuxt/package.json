@@ -1,7 +1,7 @@
 {
   "name": "@bughq/nuxt",
   "type": "module",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "bughq error tracking — Nuxt module",
   "license": "MIT",
   "homepage": "https://bughq.org",

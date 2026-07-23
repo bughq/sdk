@@ -1,7 +1,7 @@
 {
   "name": "@bughq/monorepo",
   "type": "module",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "private": true,
   "description": "bughq error-tracking SDKs — core, Vue, Nuxt, and Stacks/stx",
   "author": "bughq",
