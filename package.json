@@ -23,10 +23,15 @@
     "format": "bunx --bun pickier . --format",
     "format:fix": "bunx --bun pickier . --format --write",
     "typecheck": "bunx --bun tsc --noEmit",
-    "publish:packages": "bun run scripts/build.ts && bun run scripts/publish.ts"
+    "publish:packages": "bun run scripts/build.ts && bun run scripts/publish.ts",
+    "release": "bumpp package.json 'packages/*/package.json'",
+    "release:patch": "bumpp patch --yes package.json 'packages/*/package.json'",
+    "release:minor": "bumpp minor --yes package.json 'packages/*/package.json'",
+    "release:major": "bumpp major --yes package.json 'packages/*/package.json'"
   },
   "devDependencies": {
     "@nuxt/kit": "^3.14.0",
+    "bumpp": "^12.0.0",
     "@types/bun": "^1.1.14",
     "@types/node": "^22.10.2",
     "pickier": "^0.1.38",
