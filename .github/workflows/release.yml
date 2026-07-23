@@ -4,6 +4,10 @@ on:
   push:
     tags: ['v*']
 
+permissions:
+  contents: read
+  id-token: write # npm trusted publishing (OIDC); falls back to NPM_TOKEN
+
 jobs:
   publish:
     runs-on: ubuntu-latest
@@ -12,9 +16,66 @@ jobs:
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: latest
+
+      # Install pantry — the workspace publisher stacks uses. It resolves
+      # workspace:* → concrete versions, topo-orders (sdk before vue/nuxt/stx),
+      # and skips already-published versions so re-runs are idempotent.
+      - uses: pantry-pm/pantry/packages/action@d738d5fd2e543e3b8380e5fbd5d01ba8936c1790 # v0.10.47
+        with:
+          version: '0.10.47'
+
       - run: bun install
-      - run: bun run build
-      - run: echo "//registry.npmjs.org/:_authToken=${NPM_TOKEN}" > ~/.npmrc
+
+      # Build every package's dist BEFORE publishing — we publish with
+      # --ignore-scripts, so a missing dist is never rebuilt at publish time.
+      - name: Build packages
+        run: bun run build
+
+      # Belt-and-suspenders against a dist-less publish: every publishable
+      # package must have a non-empty dist/*.js before we ship the tarball.
+      - name: Verify built dist
+        run: |
+          missing=""
+          for dir in packages/*/; do
+            pkg="${dir}package.json"
+            [ -f "$pkg" ] || continue
+            grep -q '"private": *true' "$pkg" && continue
+            if [ -z "$(find "${dir}dist" -name '*.js' -type f 2>/dev/null | head -1)" ]; then
+              echo "::error::no built dist/*.js for ${dir%/}"
+              missing="${missing} ${dir%/}"
+            fi
+          done
+          if [ -n "$missing" ]; then
+            echo "::error::Refusing to publish — dist missing for:${missing}"
+            exit 1
+          fi
+
+      # Publish the whole @bughq workspace via pantry. Resolves workspace:* →
+      # concrete versions, topo-orders, skips already-published. Authenticates
+      # via npm trusted publishing (OIDC; id-token: write above), falling back
+      # to NPM_TOKEN outside OIDC.
+      - name: Publish
+        run: pantry publish --npm --access public --ignore-scripts 'packages/*'
         env:
           NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
-      - run: bun run scripts/publish.ts
+
+      # Publishing succeeded is not enough — verify the public artifact installs
+      # from a clean, non-workspace dir (catches a lingering workspace:* protocol
+      # in the published manifest).
+      - name: Verify published install
+        run: |
+          version="${GITHUB_REF#refs/tags/v}"
+          smoke_dir="$(mktemp -d)"
+          trap 'rm -rf "$smoke_dir"' EXIT
+          cd "$smoke_dir"
+          echo '{"name":"bughq-release-smoke","private":true}' > package.json
+          for attempt in 1 2 3 4 5 6; do
+            if bun add "@bughq/nuxt@${version}" "@bughq/sdk@${version}" --no-save 2>/dev/null; then
+              echo "✓ @bughq/nuxt@${version} + @bughq/sdk@${version} install cleanly"
+              exit 0
+            fi
+            echo "install attempt ${attempt} failed (registry eventual consistency); retrying…"
+            sleep 15
+          done
+          echo "::error::published @bughq packages failed to install from a clean dir"
+          exit 1
