@@ -30,7 +30,7 @@ export interface SnippetOptions {
  * ```
  */
 export function clientSnippet(options: SnippetOptions): string {
-  // TEMPORARY: local-dev phase; switch back to 'https://bughq.org' at launch.
-  const host = (options.host ?? 'http://localhost:3108').replace(/\/+$/, '')
+  // Fixed production ingest endpoint. Self-hosters override `host`.
+  const host = (options.host ?? 'https://bughq.org').replace(/\/+$/, '')
   return `<script src="${host}/sdk.js" data-project="${options.project}" data-key="${options.key}"></script>`
 }

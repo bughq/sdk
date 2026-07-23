@@ -140,9 +140,9 @@ export interface BugHQConfig {
   beforeSend?: (event: BugHQEvent) => BugHQEvent | null | void
 }
 
-// TEMPORARY: local-dev phase — the SDK fires at the local bughq ingest.
-// Switch back to 'https://bughq.org' before publishing for real users.
-const DEFAULT_HOST = 'http://localhost:3108'
+// Fixed production ingest endpoint — errors POST to `${DEFAULT_HOST}/errors`.
+// Self-hosters point elsewhere via `host` or a DSN; everyone else needs only a key.
+const DEFAULT_HOST = 'https://bughq.org'
 
 interface Resolved {
   project: string
@@ -637,22 +637,30 @@ export class BugHQClient {
   // --- Transport ----------------------------------------------------------
 
   private send(event: BugHQEvent): void {
+    // The ingest key travels in the BODY (`key`), not an `X-BugHQ-Key` header.
+    // A custom header forces a CORS preflight, and the ingest's allowed headers
+    // (framework-fixed to Content-Type/Authorization) don't include it, so a
+    // browser cross-origin send would be blocked. sendBeacon can't set headers
+    // either. The server accepts `body.key` (X-BugHQ-Key ?? body.key), so this
+    // works for browser, beacon, and server transports alike.
+    const payload = { ...event, key: this.config.key }
     let body: string
     try {
-      body = JSON.stringify(event)
+      body = JSON.stringify(payload)
     }
     catch {
       // Circular or unserializable payload — drop the rich fields and retry once.
-      body = JSON.stringify({ ...event, extra: null, contexts: undefined, breadcrumbs: undefined })
+      body = JSON.stringify({ ...payload, extra: null, contexts: undefined, breadcrumbs: undefined })
     }
     this.transport(body, 0, event.type)
   }
 
   private transport(body: string, attempt: number, label: string): void {
     const url = `${this.config.host}/errors`
+    // Key is in the body (see send()) — no custom header means the only preflight
+    // header is Content-Type, which the ingest's CORS allows.
     const headers: Record<string, string> = {
       'Content-Type': 'application/json',
-      'X-BugHQ-Key': this.config.key,
     }
     // Browsers forbid setting User-Agent (silently dropped); Node/Bun honor it,
     // and the server reads UA from this header for server-side clients.
