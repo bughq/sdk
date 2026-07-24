@@ -185,18 +185,26 @@ export function parseDsn(dsn: string): { host: string, key: string, project: str
 }
 
 function resolveAutoInstrument(value: boolean | AutoInstrumentOptions | undefined): Required<AutoInstrumentOptions> {
-  if (value === false)
-    return { console: false, fetch: false, xhr: false, dom: false, navigation: false }
+  // Auto-instrumentation monkey-patches HOST globals — window.fetch,
+  // XMLHttpRequest, console.*, history, and a document click listener — to
+  // record breadcrumbs. That's invasive (it can reroute/duplicate the app's own
+  // fetch and console), so it's strictly OPT-IN: `undefined` or `false` patches
+  // NOTHING. Error capture (window error/unhandledrejection + framework hooks
+  // like vue:error) is independent of this and still works with it all off.
+  // Pass `true` for everything, or an object to enable specific channels.
+  if (value === true)
+    return { console: true, fetch: true, xhr: true, dom: true, navigation: true }
   if (value && typeof value === 'object') {
     return {
-      console: value.console !== false,
-      fetch: value.fetch !== false,
-      xhr: value.xhr !== false,
-      dom: value.dom !== false,
-      navigation: value.navigation !== false,
+      console: value.console === true,
+      fetch: value.fetch === true,
+      xhr: value.xhr === true,
+      dom: value.dom === true,
+      navigation: value.navigation === true,
     }
   }
-  return { console: true, fetch: true, xhr: true, dom: true, navigation: true }
+  // undefined or false → touch no host globals.
+  return { console: false, fetch: false, xhr: false, dom: false, navigation: false }
 }
 
 function resolveConfig(config: BugHQConfig): Resolved {
