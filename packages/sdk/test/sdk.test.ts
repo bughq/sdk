@@ -55,8 +55,13 @@ describe('BugHQClient', () => {
     expect(calls).toHaveLength(1)
     expect(calls[0].url).toBe('http://localhost:3108/errors')
     expect(calls[0].options.method).toBe('POST')
-    expect(calls[0].options.headers['X-BugHQ-Key']).toBe('k_123')
+    // The key travels in the BODY, not an X-BugHQ-Key header — a custom header
+    // forces a CORS preflight the ingest does not allow, and sendBeacon cannot
+    // set headers at all (see send() in src/index.ts). This assertion used to
+    // check the header and had been failing since that change.
+    expect(calls[0].options.headers['X-BugHQ-Key']).toBeUndefined()
     const body = JSON.parse(calls[0].options.body)
+    expect(body.key).toBe('k_123')
     expect(body.project).toBe('demo')
     expect(body.type).toBe('TypeError')
     expect(body.message).toBe('boom at x')

@@ -9,8 +9,10 @@
  * `@bughq/vue`, `@bughq/nuxt`, and `@bughq/stx` packages build framework-aware
  * capture on top of this.
  *
- * Ingest contract: `POST {host}/errors`, header `X-BugHQ-Key: <ingest_key>`,
- * JSON body `{ project, type, message, stack, level, url, browser, os,
+ * Ingest contract: `POST {host}/errors`, with the ingest key in the JSON BODY
+ * as `key` — not an `X-BugHQ-Key` header, which would force a CORS preflight
+ * the ingest does not allow and which sendBeacon cannot set at all. See send().
+ * JSON body `{ key, project, type, message, stack, level, url, browser, os,
  * framework, release, environment, timestamp, user, extra, tags, contexts,
  * breadcrumbs, sdk, session, fingerprint }`. The ingest key is public (it ships
  * in client code) — a revocable identifier, not a secret.
@@ -116,7 +118,14 @@ export interface BugHQConfig {
   maxBreadcrumbs?: number
   /** Install `window.onerror` / `unhandledrejection` handlers. Default true. */
   captureUnhandled?: boolean
-  /** Browser breadcrumb auto-instrumentation. `false` disables all; object toggles each. Default all on. */
+  /**
+   * Browser breadcrumb auto-instrumentation. **Default: all OFF.**
+   *
+   * Opt-in since d0865bb, because every channel patches a host global
+   * (console, fetch, XMLHttpRequest, history, a document click listener).
+   * Pass `true` for all of them, or an object to pick channels. Error capture
+   * is independent and works with all of this off.
+   */
   autoInstrument?: boolean | AutoInstrumentOptions
   /** Drop events whose type/message matches any of these. */
   ignoreErrors?: Array<string | RegExp>

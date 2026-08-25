@@ -25,9 +25,11 @@ test('server init + captureException POSTs with a User-Agent header', () => {
   captureException(new RangeError('server boom'))
   expect(calls).toHaveLength(1)
   const opts = calls[0].options
-  expect(opts.headers['X-BugHQ-Key']).toBe('k')
+  // Key in the body, not a header — see the note in packages/sdk/test/sdk.test.ts.
+  expect(opts.headers['X-BugHQ-Key']).toBeUndefined()
   expect(opts.headers['User-Agent']).toContain('@bughq/stx')
   const body = JSON.parse(opts.body)
+  expect(body.key).toBe('k')
   expect(body.type).toBe('RangeError')
   expect(body.framework).toBe('stacks')
 })
