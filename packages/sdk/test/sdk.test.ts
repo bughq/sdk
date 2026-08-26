@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test'
-import { BugHQClient, captureException, close, init, parseDsn, parseUserAgent, report, SDK_NAME } from '../src/index'
+import { maskUrl, BugHQClient, captureException, close, init, parseDsn, parseUserAgent, report, SDK_NAME } from '../src/index'
 
 // Capture outgoing requests by stubbing global fetch.
 let calls: Array<{ url: string, options: any }>
@@ -314,5 +314,72 @@ describe('heartbeat', () => {
     // eslint-disable-next-line no-new
     new BugHQClient({ ...cfg, key: `k_off_${Math.random()}`, heartbeat: false })
     expect(calls.filter(u => String(u).endsWith('/sdk/hello'))).toHaveLength(0)
+  })
+})
+
+describe('maskUrl', () => {
+  test('drops the query string, which is where the secrets are', () => {
+    expect(maskUrl('https://api.x.test/v1/session?token=abc123&email=a@b.test')).toContain('?…')
+    expect(maskUrl('https://api.x.test/v1/session?token=abc123')).not.toContain('abc123')
+  })
+
+  test('templates ids so one route is one breadcrumb', () => {
+    const a = maskUrl('https://api.x.test/api/orders/8823')
+    const b = maskUrl('https://api.x.test/api/orders/9110')
+    expect(a).toBe(b)
+    expect(a).toContain('{n}')
+  })
+
+  test('templates uuids and mixed letter-digit ids', () => {
+    expect(maskUrl('https://x.test/u/3f2504e0-4f89-11d3-9a0c-0305e82c3301')).toContain('{uuid}')
+    expect(maskUrl('https://x.test/pay/pi_3Nx8fLk')).toContain('{id}')
+  })
+
+  test('an unparseable url still loses its query', () => {
+    expect(maskUrl('::::?token=secret')).not.toContain('secret')
+  })
+})
+
+describe('console instrumentation', () => {
+  test('the SDK\'s own debug logging does not become a breadcrumb', async () => {
+    const calls: any[] = []
+    ;(globalThis as any).fetch = (_u: string, o: any) => {
+      calls.push(JSON.parse(o.body))
+      return Promise.resolve({ ok: true, status: 200 })
+    }
+    const c = new BugHQClient({
+      ...cfg,
+      key: `k_dbg_${Math.random()}`,
+      debug: true,
+      autoInstrument: { console: true },
+    })
+    // Two sends with debug on. Without the raw-console references, each
+    // successful send console.info()s through a PATCHED method and becomes a
+    // breadcrumb on the next event — the SDK feeding itself.
+    c.captureException(new Error('one'))
+    await new Promise(r => setTimeout(r, 50))
+    c.captureException(new Error('two'))
+    await new Promise(r => setTimeout(r, 50))
+
+    const second = calls.at(-1)
+    const selfLogged = (second?.breadcrumbs ?? []).filter((b: any) => String(b.message ?? '').includes('[bughq]'))
+    expect(selfLogged).toHaveLength(0)
+  })
+})
+
+describe('flush', () => {
+  test('waits for an in-flight send instead of lying', async () => {
+    let release: (v: any) => void = () => {}
+    ;(globalThis as any).fetch = () => new Promise((res) => { release = res })
+    const c = new BugHQClient({ ...cfg, key: `k_fl_${Math.random()}` })
+    c.captureException(new Error('pending'))
+
+    // The send has not settled, so a bounded flush must report false rather
+    // than the unconditional true this used to return.
+    expect(await c.flush(50)).toBe(false)
+
+    release({ ok: true, status: 200 })
+    await new Promise(r => setTimeout(r, 10))
+    expect(await c.flush(500)).toBe(true)
   })
 })

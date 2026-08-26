@@ -411,6 +411,12 @@ export class BugHQClient {
   private breadcrumbs: Breadcrumb[] = []
   private lastSeen = new Map<string, number>()
   private detach: Array<() => void> = []
+  /** Guards against the breadcrumb path re-entering patched console methods. */
+  private inConsole = false
+  /** In-flight sends, so flush() can mean something. */
+  private readonly inFlight = new Set<Promise<unknown>>()
+  /** Unpatched console methods, kept before patching, for the SDK's own logging. */
+  private rawConsole: { warn?: (...a: unknown[]) => void, info?: (...a: unknown[]) => void, error?: (...a: unknown[]) => void } = {}
   // Snapshot of `fetch` taken before we instrument it, so the SDK's own sends
   // never re-enter our fetch breadcrumb wrapper (and never recurse).
   private nativeFetch: typeof fetch | null
@@ -772,21 +778,25 @@ export class BugHQClient {
         }
       }
       else if (this.config.debug) {
-        console.warn('[bughq] no transport available — event dropped')
+        (this.rawConsole.warn ?? console.warn)('[bughq] no transport available — event dropped')
       }
       return
     }
 
     try {
-      doFetch(url, { method: 'POST', keepalive: true, headers, body }).then(
+      // Tracked so flush() can wait for it. Removed in both branches, or a
+      // long-lived page would accumulate one settled promise per event.
+      const pending = doFetch(url, { method: 'POST', keepalive: true, headers, body }).then(
         (r: any) => {
           if (r && typeof r.status === 'number' && r.status >= 500)
             this.retry(body, attempt, label)
           else if (this.config.debug)
-            console.info('[bughq] sent', label, r && r.status)
+            (this.rawConsole.info ?? console.info)('[bughq] sent', label, r && r.status)
         },
         () => this.retry(body, attempt, label),
       )
+      this.inFlight.add(pending)
+      pending.finally(() => this.inFlight.delete(pending))
     }
     catch {
       this.retry(body, attempt, label)
@@ -806,8 +816,21 @@ export class BugHQClient {
   }
 
   /** Resolves when in-flight sends settle. Sends are fire-and-forget, so this is a courtesy no-op. */
-  flush(): Promise<boolean> {
-    return Promise.resolve(true)
+  /**
+   * Resolve once every in-flight send has settled.
+   *
+   * This returned `Promise.resolve(true)` immediately while being exported as
+   * public API, so anything that awaited it — a route guard, a pagehide handler,
+   * a test — was told the queue was empty when it was not. It now tracks real
+   * requests. `true` means everything settled; `false` means the timeout won,
+   * so a caller can decide whether to block a navigation.
+   */
+  async flush(timeoutMs = 2000): Promise<boolean> {
+    if (this.inFlight.size === 0)
+      return true
+    const settled = Promise.allSettled([...this.inFlight]).then(() => true)
+    const timedOut = new Promise<boolean>(resolve => setTimeout(() => resolve(false), timeoutMs))
+    return Promise.race([settled, timedOut])
   }
 
   // --- Instrumentation ----------------------------------------------------
@@ -848,17 +871,34 @@ export class BugHQClient {
     const c = g.console
     if (!c)
       return
+    // Keep unpatched references before patching, and use them for the SDK's own
+    // logging. Otherwise `debug: true` makes the SDK feed itself: console.info
+    // on every successful send becomes a breadcrumb, so a quiet app accumulates
+    // one crumb per event and evicts the ones that mattered. The re-entrancy
+    // guard below closes the same loop for anything the breadcrumb path itself
+    // logs.
+    this.rawConsole = { warn: c.warn?.bind(c), info: c.info?.bind(c), error: c.error?.bind(c) }
     const levels: Array<[string, Level]> = [['log', 'info'], ['info', 'info'], ['warn', 'warning'], ['error', 'error']]
     for (const [method, level] of levels) {
       const original = c[method]
       if (typeof original !== 'function')
         continue
       c[method] = (...args: unknown[]) => {
+        // Anything the breadcrumb path logs would otherwise re-enter here.
+        if (this.inConsole)
+          return original.apply(c, args)
+        this.inConsole = true
         try {
           this.addBreadcrumb({ type: 'console', category: `console.${method}`, level, message: args.map(a => safeStringify(a)).join(' ').slice(0, 500) })
         }
         catch {
           // never let a breadcrumb break console
+        }
+        finally {
+          // Released in `finally`, not after the try: an early return or a
+          // throw would otherwise leave it set and silently disable console
+          // capture for the rest of the session.
+          this.inConsole = false
         }
         return original.apply(c, args)
       }
@@ -883,8 +923,8 @@ export class BugHQClient {
         return p
       if (p && typeof p.then === 'function') {
         p.then(
-          (res: any) => self.addBreadcrumb({ type: 'http', category: 'fetch', level: res && res.status >= 400 ? 'warning' : 'info', data: { method: String(method).toUpperCase(), url: reqUrl, status: res && res.status, durationMs: Date.now() - started } }),
-          () => self.addBreadcrumb({ type: 'http', category: 'fetch', level: 'error', data: { method: String(method).toUpperCase(), url: reqUrl, error: true, durationMs: Date.now() - started } }),
+          (res: any) => self.addBreadcrumb({ type: 'http', category: 'fetch', level: res && res.status >= 400 ? 'warning' : 'info', data: { method: String(method).toUpperCase(), url: maskUrl(reqUrl), status: res && res.status, durationMs: Date.now() - started } }),
+          () => self.addBreadcrumb({ type: 'http', category: 'fetch', level: 'error', data: { method: String(method).toUpperCase(), url: maskUrl(reqUrl), error: true, durationMs: Date.now() - started } }),
         )
       }
       return p
@@ -914,7 +954,7 @@ export class BugHQClient {
           try {
             if (typeof meta.url === 'string' && meta.url.indexOf(host) === 0)
               return
-            self.addBreadcrumb({ type: 'http', category: 'xhr', level: this.status >= 400 ? 'warning' : 'info', data: { method: String(meta.method).toUpperCase(), url: meta.url, status: this.status, durationMs: Date.now() - meta.started } })
+            self.addBreadcrumb({ type: 'http', category: 'xhr', level: this.status >= 400 ? 'warning' : 'info', data: { method: String(meta.method).toUpperCase(), url: maskUrl(meta.url), status: this.status, durationMs: Date.now() - meta.started } })
           }
           catch {
             // ignore
@@ -997,6 +1037,48 @@ export class BugHQClient {
 }
 
 /** JSON.stringify that never throws (used for console breadcrumbs). */
+/**
+ * A URL reduced to what is diagnostic, with what is sensitive removed.
+ *
+ * Breadcrumbs recorded the raw request URL, so a query string went to bughq
+ * verbatim — and query strings in a real app carry tokens, emails, order
+ * contents and session ids. The path is what tells you which call failed; the
+ * query almost never is.
+ *
+ * Also templates numeric and id-shaped path segments, so /api/orders/8823 and
+ * /api/orders/9110 read as one route rather than two unrelated breadcrumbs.
+ */
+export function maskUrl(raw: string): string {
+  try {
+    const u = new URL(raw, typeof root()?.location?.href === 'string' ? root().location.href : 'http://x')
+    const path = u.pathname
+      .split('/')
+      .map((seg) => {
+        if (!seg)
+          return seg
+        if (/^\d+$/.test(seg))
+          return '{n}'
+        if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(seg))
+          return '{uuid}'
+        // Mixed letters-and-digits of any length is an id in practice
+        // (ord_a8f3kd, pi_3Nx…, SKU-AB12) and never a route name.
+        if (seg.length >= 4 && /[a-z]/i.test(seg) && /\d/.test(seg))
+          return '{id}'
+        return seg
+      })
+      .join('/')
+    // Origin kept only when it is not the page's own — a third-party host is
+    // diagnostic, your own is noise on every row.
+    const sameOrigin = typeof root()?.location?.origin === 'string' && u.origin === root().location.origin
+    return (sameOrigin ? '' : u.origin) + path + (u.search ? '?…' : '')
+  }
+  catch {
+    // Not parseable as a URL. Return the part before any query rather than the
+    // whole thing, so a malformed URL cannot leak what a valid one would not.
+    return String(raw).split('?')[0].slice(0, 200)
+  }
+}
+
 function safeStringify(value: unknown): string {
   if (typeof value === 'string')
     return value
