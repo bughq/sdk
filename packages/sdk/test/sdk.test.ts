@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test'
-import { maskUrl, BugHQClient, captureException, close, init, parseDsn, parseUserAgent, report, SDK_NAME } from '../src/index'
+import { consoleArgs, maskUrl, scrubValue, skeletonize, BugHQClient, captureException, close, init, parseDsn, parseUserAgent, report, SDK_NAME } from '../src/index'
 
 // Capture outgoing requests by stubbing global fetch.
 let calls: Array<{ url: string, options: any }>
@@ -381,5 +381,101 @@ describe('flush', () => {
     release({ ok: true, status: 200 })
     await new Promise(r => setTimeout(r, 10))
     expect(await c.flush(500)).toBe(true)
+  })
+})
+
+describe('scrubValue', () => {
+  test('removes the things that would otherwise be emailed', () => {
+    expect(scrubValue('login for a@b.test')).toBe('login for [email]')
+    expect(scrubValue('sk_live_51H8xKjLmNoPqRsTu rejected')).toBe('[key] rejected')
+    expect(scrubValue('?token=s3cr3tvalue&page=2')).toBe('?token=[redacted]&page=2')
+    expect(scrubValue('card 4242424242424242')).toBe('card [card]')
+  })
+
+  test('the Luhn check stops it eating ordinary long numbers', () => {
+    // 16 digits, fails Luhn — must survive, or every order id becomes [card].
+    expect(scrubValue('ref 1234567890123456')).toContain('1234567890123456')
+  })
+})
+
+describe('consoleArgs', () => {
+  test('objects and arrays become type tokens, never serialized', () => {
+    const out = consoleArgs(['API Error:', { user: { email: 'a@b.test' }, pan: '4242424242424242' }])
+    expect(out).toBe('API Error: [Object]')
+    expect(out).not.toContain('a@b.test')
+    expect(out).not.toContain('4242')
+  })
+
+  test('an Error keeps its name and a scrubbed message', () => {
+    expect(consoleArgs(['failed', new Error('for a@b.test')])).toBe('failed Error: for [email]')
+  })
+})
+
+describe('skeletonize', () => {
+  test('two ids of the same shape collapse to one key', () => {
+    expect(skeletonize('order ord_a8f3kd failed for user 8823'))
+      .toBe(skeletonize('order ord_zz91qq failed for user 9110'))
+  })
+})
+
+describe('captureConsole', () => {
+  const mkClient = (over: Record<string, unknown> = {}) => {
+    ;(globalThis as any).location = { href: 'https://app.test/x', origin: 'https://app.test', pathname: '/x' }
+    return new BugHQClient({
+      ...cfg,
+      key: `k_cc_${Math.random()}`,
+      captureConsole: true,
+      autoInstrument: { console: true },
+      ...over,
+    })
+  }
+  const errorsOnly = () => calls.filter(c => String(c.url).endsWith('/errors'))
+
+  test('is off unless asked for', () => {
+    const c = new BugHQClient({ ...cfg, key: `k_off_${Math.random()}`, autoInstrument: { console: true } })
+    expect((c as any).config.captureConsole).toBe(false)
+  })
+
+  test('one call site firing repeatedly is one event, not one per call', () => {
+    mkClient()
+    for (let i = 0; i < 50; i++)
+      console.error('cart failed', new Error('boom'))
+    expect(errorsOnly().length).toBe(1)
+  })
+
+  test('a bare console.error(err) with no label is not captured', () => {
+    mkClient()
+    console.error(new Error('rethrown'))
+    expect(errorsOnly().length).toBe(0)
+  })
+
+  test('the fingerprint is the call shape, so varying ids are one group', () => {
+    mkClient()
+    console.error('order ord_a8f3kd failed')
+    const first = JSON.parse(errorsOnly()[0].options.body).fingerprint
+    expect(first[0]).toBe('bughq.console')
+    expect(first.join('|')).toContain('{id}')
+    // Fixed arity: absent slots are '-', never '', or the server's
+    // .filter(Boolean) shifts parts left and collides across shapes.
+    expect(first).toHaveLength(6)
+    expect(first.every((p: string) => p !== '')).toBe(true)
+  })
+})
+
+describe('reportFailure', () => {
+  test('groups by operation and outcome, not message text', () => {
+    const c = new BugHQClient({ ...cfg, key: `k_rf_${Math.random()}` })
+    c.reportFailure('checkout.confirm', Object.assign(new Error('card declined for 8823'), { status: 402 }))
+    const body = JSON.parse(calls.filter(x => String(x.url).endsWith('/errors'))[0].options.body)
+    expect(body.fingerprint).toEqual(['bughq.op', 'checkout.confirm', 'client'])
+    expect(body.type).toBe('OperationFailed')
+  })
+
+  test('a 500 and a timeout are different outcomes', () => {
+    const c = new BugHQClient({ ...cfg, key: `k_rf2_${Math.random()}` })
+    c.reportFailure('cart.load', Object.assign(new Error('x'), { status: 503 }))
+    c.reportFailure('cart.load', new Error('request timed out'))
+    const fps = calls.filter(x => String(x.url).endsWith('/errors')).map(x => JSON.parse(x.options.body).fingerprint.join('|'))
+    expect(new Set(fps).size).toBe(2)
   })
 })

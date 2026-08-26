@@ -119,6 +119,39 @@ export interface BugHQConfig {
   /** Install `window.onerror` / `unhandledrejection` handlers. Default true. */
   captureUnhandled?: boolean
   /**
+   * Promote `console.error` to an ISSUE, not just a breadcrumb. Default false.
+   *
+   * The case this exists for is a failure your code catches and logs: a Stripe
+   * confirmCardPayment that RESOLVES with an error, an API call swallowed to
+   * show a friendly message. Nothing throws, no promise rejects, so no other
+   * capture path can see it.
+   *
+   * Separate from `autoInstrument.console`, deliberately. That flag answers
+   * "what becomes a breadcrumb"; conflating them would mean anyone who already
+   * set `autoInstrument: true` silently starts creating billable issues.
+   *
+   * Only `console.error`. warn/log/info are not reachable by widening this —
+   * they are the bulk of console traffic and would bury the signal.
+   */
+  captureConsole?: boolean
+  /**
+   * Only capture when the first argument is a string. Default true.
+   *
+   * `console.error(err)` with no label is usually a rethrow of something the
+   * SDK has already captured by other means, and it has no stable text to group
+   * on. Requiring a developer-authored label is what keeps the fingerprint
+   * vocabulary finite.
+   */
+  requireLabel?: boolean
+  /**
+   * Capture console errors originating in third-party scripts. Default false.
+   *
+   * Stripe.js, analytics and chat widgets log constantly and you can fix none
+   * of it. Judged by whether the top non-SDK frame is same-origin.
+   */
+  vendors?: boolean
+
+  /**
    * Send a once-a-day check-in so bughq can distinguish "this app is healthy"
    * from "the SDK never loaded". Default true. Carries no URL, user or session,
    * is never metered, and never creates an issue. Set false to disable, or
@@ -174,6 +207,9 @@ interface Resolved {
   dedupeMs: number
   maxBreadcrumbs: number
   captureUnhandled: boolean
+  captureConsole: boolean
+  requireLabel: boolean
+  vendors: boolean
   heartbeat: boolean
   autoInstrument: Required<AutoInstrumentOptions>
   ignoreErrors: Array<string | RegExp>
@@ -250,6 +286,10 @@ function resolveConfig(config: BugHQConfig): Resolved {
     dedupeMs: config.dedupeMs ?? 5000,
     maxBreadcrumbs: config.maxBreadcrumbs ?? 30,
     captureUnhandled: config.captureUnhandled !== false,
+    // Opt-IN: this is the only flag here that can create billable issues.
+    captureConsole: config.captureConsole === true,
+    requireLabel: config.requireLabel !== false,
+    vendors: config.vendors === true,
     heartbeat: config.heartbeat !== false,
     autoInstrument: resolveAutoInstrument(config.autoInstrument),
     ignoreErrors: config.ignoreErrors ?? [],
@@ -413,6 +453,8 @@ export class BugHQClient {
   private detach: Array<() => void> = []
   /** Guards against the breadcrumb path re-entering patched console methods. */
   private inConsole = false
+  /** Per-fingerprint backoff state for console capture. */
+  private readonly groups = new Map<string, { last: number, n: number, suppressed: number }>()
   /** In-flight sends, so flush() can mean something. */
   private readonly inFlight = new Set<Promise<unknown>>()
   /** Unpatched console methods, kept before patching, for the SDK's own logging. */
@@ -539,6 +581,48 @@ export class BugHQClient {
     this.level = level
   }
 
+  /**
+   * Report a failure your code handled, grouped by OPERATION rather than by
+   * message text.
+   *
+   * For the failures that log nothing at all, or that log something too varied
+   * to group on. `op` is a name you choose and keep stable — 'checkout.confirm',
+   * 'cart.load' — so the issue stays one issue however the message changes.
+   */
+  reportFailure(op: string, error?: unknown, context?: Record<string, unknown>): void {
+    const slug = String(op).toLowerCase().replace(/[^a-z0-9._-]+/g, '-').slice(0, 64) || 'unknown'
+    const err = error instanceof Error ? error : undefined
+    const outcome = this.outcomeOf(error)
+    const detail = err ? `${err.name}: ${scrubValue(String(err.message)).slice(0, 200)}` : scrubValue(String(error ?? '')).slice(0, 200)
+    this.dispatch(
+      { type: 'OperationFailed', message: `${slug} failed (${outcome})${detail ? `: ${detail}` : ''}`, stack: err?.stack, level: 'error' },
+      context ? { context } : undefined,
+      ['bughq.op', slug, outcome],
+    )
+  }
+
+  /** Classify a failure into a small, finite vocabulary for the fingerprint. */
+  private outcomeOf(error: unknown): string {
+    const any = error as any
+    const status = Number(any?.status ?? any?.statusCode ?? any?.response?.status ?? 0)
+    if (status >= 500)
+      return 'server'
+    if (status === 401 || status === 403)
+      return 'auth'
+    if (status === 422 || status === 400)
+      return 'validation'
+    if (status === 429)
+      return 'throttle'
+    if (status >= 400)
+      return 'client'
+    const msg = String(any?.message ?? '').toLowerCase()
+    if (msg.includes('timeout') || msg.includes('timed out'))
+      return 'timeout'
+    if (msg.includes('network') || msg.includes('failed to fetch'))
+      return 'network'
+    return 'exception'
+  }
+
   setFingerprint(fingerprint: string[] | null): void {
     this.fingerprint = fingerprint
   }
@@ -593,7 +677,12 @@ export class BugHQClient {
       this.captureException(error, extra)
   }
 
-  private dispatch(base: { type: string, message: string, stack?: string, level: Level }, extra?: Record<string, unknown>): void {
+  /**
+   * `fingerprint` is a per-call override. The SDK only had `setFingerprint`,
+   * which is sticky client scope — it would have pinned EVERY subsequent event
+   * to one console error's group.
+   */
+  private dispatch(base: { type: string, message: string, stack?: string, level: Level }, extra?: Record<string, unknown>, fingerprint?: string[]): void {
     if (!this.config.enabled)
       return
     if (this.config.sampleRate < 1 && Math.random() > this.config.sampleRate)
@@ -642,7 +731,7 @@ export class BugHQClient {
       breadcrumbs: this.breadcrumbs.length ? this.breadcrumbs.slice() : undefined,
       sdk: { name: this.config.sdkName, version: SDK_VERSION },
       session: this.session,
-      fingerprint: this.fingerprint ?? undefined,
+      fingerprint: fingerprint ?? this.fingerprint ?? undefined,
     }
 
     if (this.config.beforeSend) {
@@ -850,12 +939,18 @@ export class BugHQClient {
   }
 
   private installAutoInstrumentation(): void {
+    const opt = this.config.autoInstrument
+    // Console first, and OUTSIDE the window guard. It is the one channel that
+    // exists in every runtime — Node, Bun, a worker, a test — while fetch, XHR,
+    // history and document clicks genuinely need a browser. Gating console on
+    // `window` meant a server SDK could ask for console capture and silently
+    // get none, which is also why this was invisible under test.
+    if (opt.console)
+      this.instrumentConsole()
+
     const w = safeWindow()
     if (!w)
       return
-    const opt = this.config.autoInstrument
-    if (opt.console)
-      this.instrumentConsole()
     if (opt.fetch)
       this.instrumentFetch(w)
     if (opt.xhr)
@@ -889,7 +984,12 @@ export class BugHQClient {
           return original.apply(c, args)
         this.inConsole = true
         try {
-          this.addBreadcrumb({ type: 'console', category: `console.${method}`, level, message: args.map(a => safeStringify(a)).join(' ').slice(0, 500) })
+          // One scrub pass feeds both channels, so a secret cannot be masked in
+          // the issue and left intact in the breadcrumb beside it.
+          const text = consoleArgs(args)
+          this.addBreadcrumb({ type: 'console', category: `console.${method}`, level, message: text })
+          if (method === 'error' && this.config.captureConsole)
+            this.captureConsoleError(args, text)
         }
         catch {
           // never let a breadcrumb break console
@@ -904,6 +1004,116 @@ export class BugHQClient {
       }
       this.detach.push(() => { c[method] = original })
     }
+  }
+
+  /**
+   * Turn one console.error into an issue, if it passes every gate.
+   *
+   * The gates exist because the failure mode here is not "we miss one" but "we
+   * mint ten thousand". Each is cheap and each removes a whole class:
+   *
+   *   requireLabel  — a bare console.error(err) has no stable text to group on
+   *                   and is usually a rethrow of something already captured.
+   *   vendors       — Stripe.js and analytics log constantly and you cannot fix
+   *                   any of it. Judged by the top non-SDK frame's origin.
+   *   backoff       — the same call site firing in a render loop is one issue,
+   *                   not one event per frame.
+   */
+  private captureConsoleError(args: unknown[], text: string): void {
+    const label = args[0]
+    if (this.config.requireLabel && typeof label !== 'string')
+      return
+    const stack = new Error('bughq.console').stack ?? ''
+    if (!this.config.vendors && !this.isSameOriginStack(stack))
+      return
+
+    // The fingerprint is the SHAPE of the call, never its text. Fixed arity
+    // with '-' for absent slots: the server drops empty parts, so ''
+    // would shift every later part left and collide across shapes.
+    const err = args.find(a => a instanceof Error) as Error | undefined
+    const skeleton = skeletonize(typeof label === 'string' ? scrubValue(label) : 'console.error')
+    const parts = [
+      'bughq.console',
+      'error',
+      skeleton || '-',
+      err?.name || '-',
+      this.routeOf(err) || '-',
+      this.statusOf(err) || '-',
+    ]
+    const key = parts.join('|')
+    const suppressed = this.backoff(key)
+    if (suppressed < 0)
+      return
+
+    this.dispatch(
+      { type: 'ConsoleError', message: text, stack, level: 'error' },
+      suppressed > 0 ? { console: { suppressed } } : undefined,
+      parts,
+    )
+  }
+
+  /** True when the first frame outside the SDK belongs to this origin. */
+  private isSameOriginStack(stack: string): boolean {
+    const origin = root()?.location?.origin
+    if (!origin)
+      return true
+    for (const line of stack.split('\n').slice(1)) {
+      const m = line.match(/https?:\/\/[^\s):]+/)
+      if (!m)
+        continue
+      if (m[0].includes('/bughq') || m[0].includes('@bughq'))
+        continue
+      return m[0].startsWith(origin)
+    }
+    // No frame carried a URL — same-origin inline code, or a stack the engine
+    // did not populate. Capturing is the safer default: missing a real error
+    // costs more than one vendor row.
+    return true
+  }
+
+  private routeOf(err: unknown): string {
+    const any = err as any
+    const raw = any?.request ?? any?.url ?? any?.config?.url
+      ?? String(any?.message ?? '').match(/https?:\/\/[^\s'"`]+/)?.[0]
+    if (!raw)
+      return ''
+    const method = String(any?.method ?? any?.config?.method ?? '').toUpperCase()
+    return `${method ? `${method} ` : ''}${maskUrl(String(raw))}`
+  }
+
+  private statusOf(err: unknown): string {
+    const any = err as any
+    const n = any?.status ?? any?.statusCode ?? any?.response?.status
+      ?? String(any?.message ?? '').match(/\b([1-5]\d{2})\b/)?.[1]
+    return n ? String(n) : ''
+  }
+
+  /**
+   * Per-group exponential backoff. Returns how many were suppressed since the
+   * last emission, or -1 to drop this one.
+   *
+   * A flat rate limit is the wrong shape: a broken component logs on every
+   * render, so what matters is that the same GROUP goes quiet quickly while a
+   * new group is still immediate. This allows roughly nine emissions in the
+   * first hour, then two an hour forever.
+   */
+  private backoff(key: string): number {
+    const now = Date.now()
+    const st = this.groups.get(key)
+    if (!st) {
+      this.groups.set(key, { last: now, n: 1, suppressed: 0 })
+      return 0
+    }
+    const wait = Math.min(10_000 * 2 ** (st.n - 1), 1_800_000)
+    if (now - st.last < wait) {
+      st.suppressed++
+      return -1
+    }
+    const carried = st.suppressed
+    st.last = now
+    st.n++
+    st.suppressed = 0
+    return carried
   }
 
   private instrumentFetch(w: any): void {
@@ -1079,6 +1289,119 @@ export function maskUrl(raw: string): string {
   }
 }
 
+/**
+ * Remove secrets from a string before it can become an issue title.
+ *
+ * This is a blocker for console capture, not a nicety. `issueTitle` on the
+ * server builds `issues.title` from the message, and that title is handed to
+ * the alert dispatcher — so it leaves the system by SMTP and webhook. Anything
+ * unscrubbed here is emailed.
+ *
+ * Replacements are shape-preserving markers rather than a blanket [scrubbed],
+ * so a message stays diagnosable after it has been cleaned.
+ */
+export function scrubValue(input: string): string {
+  let out = String(input)
+  // JWTs before the generic opaque-token rule, which would otherwise eat them
+  // and lose the fact that it was a token at all.
+  out = out.replace(/\b(?:eyJ[\w-]{10,}\.){2}[\w-]{10,}\b/g, '[jwt]')
+  out = out.replace(/\b(?:sk|pk|rk)_(?:live|test)_[A-Za-z0-9]{8,}\b/g, '[key]')
+  out = out.replace(/\bBearer\s+[\w.\-+/=]{8,}/gi, 'Bearer [token]')
+  out = out.replace(/([?&](?:token|key|secret|password|signature|sig|auth|access_token|api_key)=)[^&\s]*/gi, '$1[redacted]')
+  out = out.replace(/\b[\w.%+-]+@[\w.-]+\.[A-Za-z]{2,}\b/g, '[email]')
+  // Card numbers, Luhn-checked. Without the check this pattern eats order
+  // totals, phone numbers and timestamps — anything 13-19 digits long.
+  out = out.replace(/\b(?:\d[ -]*?){13,19}\b/g, m => (luhn(m.replace(/\D/g, '')) ? '[card]' : m))
+  out = out.replace(/\b\d{3}-\d{2}-\d{4}\b/g, '[ssn]')
+  // Opaque high-entropy tokens LAST, so the specific rules above win.
+  out = out.replace(/\b[A-Za-z0-9_-]{32,}\b/g, '[token]')
+  return out
+}
+
+function luhn(digits: string): boolean {
+  if (digits.length < 13 || digits.length > 19)
+    return false
+  let sum = 0
+  let double = false
+  for (let i = digits.length - 1; i >= 0; i--) {
+    let d = digits.charCodeAt(i) - 48
+    if (d < 0 || d > 9)
+      return false
+    if (double) {
+      d *= 2
+      if (d > 9)
+        d -= 9
+    }
+    sum += d
+    double = !double
+  }
+  return sum % 10 === 0
+}
+
+/**
+ * Render console arguments for a message, by TYPE rather than by serializing.
+ *
+ * This is the single biggest privacy win and it needs no regex: objects and
+ * arrays become type tokens instead of being flattened. The trailing argument
+ * to a console.error in a real app is routinely the whole cart, order, user or
+ * payment method, and serializing it puts every field into the message, the
+ * issue title, and therefore the alert email.
+ */
+export function consoleArgs(args: unknown[]): string {
+  return args.map((a) => {
+    if (typeof a === 'string')
+      return scrubValue(a).slice(0, 200)
+    if (a === null)
+      return 'null'
+    if (a === undefined)
+      return 'undefined'
+    if (typeof a === 'number' || typeof a === 'boolean')
+      return String(a)
+    if (typeof a === 'function')
+      return '[Function]'
+    if (typeof a === 'symbol')
+      return '[Symbol]'
+    if (a instanceof Error)
+      return `${a.name}: ${scrubValue(String(a.message)).slice(0, 200)}`
+    if (Array.isArray(a))
+      return `[Array(${a.length})]`
+    return '[Object]'
+  }).join(' ').slice(0, 300)
+}
+
+/**
+ * Reduce a label to its shape, so the fingerprint groups by the call rather
+ * than by the values that happened to be interpolated into it.
+ *
+ * Stronger than the server's normalizeMessage, which masks only hex, UUIDs,
+ * bare decimals and matched quotes. The load-bearing addition is the
+ * letters-and-digits rule, which is what catches ord_a8f3kd, SKU-AB12 and
+ * pi_3Nx… — the id shapes that would otherwise mint one issue per order.
+ *
+ * It also mangles v1, utf-8 and sha256. That is harmless: it mangles them
+ * identically every time, and a skeleton is only ever hashed, never displayed.
+ */
+export function skeletonize(input: string): string {
+  let out = String(input)
+  out = out.replace(/https?:\/\/[^\s'"`)]+/g, u => maskUrl(u))
+  out = out.replace(/(['"`]).*?\1/g, '$1…$1')
+  out = out.replace(/\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/gi, '{uuid}')
+  out = out.replace(/\b[\w.%+-]+@[\w.-]+\.[A-Za-z]{2,}\b/g, '{email}')
+  // Tokens of 4+ chars containing BOTH a letter and a digit — ord_a8f3kd,
+  // SKU-AB12, pi_3Nx… — are ids in practice and never route names.
+  //
+  // Matched first, tested after. The lookahead form of this
+  // (?=[^\s]*[A-Za-z])(?=[^\s]*\d) nests unlimited quantifiers and backtracks
+  // catastrophically on a long token, which matters because this runs on every
+  // console.error in a customer's app. A single linear match plus two cheap
+  // tests on the captured string is the same rule without the hazard.
+  out = out.replace(/\b[A-Za-z0-9_-]{4,}\b/g, (tok) => {
+    return /[A-Za-z]/.test(tok) && /\d/.test(tok) ? '{id}' : tok
+  })
+  out = out.replace(/\b\d+\b/g, '{n}')
+  return out.replace(/\s+/g, ' ').trim().slice(0, 80)
+}
+
 function safeStringify(value: unknown): string {
   if (typeof value === 'string')
     return value
@@ -1151,6 +1474,10 @@ export function setExtras(extras: Record<string, unknown>): void {
 
 export function setLevel(level: Level | null): void {
   defaultClient?.setLevel(level)
+}
+
+export function reportFailure(op: string, error?: unknown, context?: Record<string, unknown>): void {
+  defaultClient?.reportFailure(op, error, context)
 }
 
 export function setFingerprint(fingerprint: string[] | null): void {

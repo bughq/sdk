@@ -21,7 +21,7 @@ export type ModuleOptions = BugHQConfig
 // Manual-capture helpers surfaced as Nuxt auto-imports, so any component,
 // composable, or server route can call `report(err)` / `captureException(err)`
 // without importing from '@bughq/sdk' first.
-const AUTO_IMPORTS = ['report', 'captureException', 'captureMessage', 'addBreadcrumb', 'setUser', 'setTag', 'setContext'] as const
+const AUTO_IMPORTS = ['report', 'reportFailure', 'captureException', 'captureMessage', 'addBreadcrumb', 'setUser', 'setTag', 'setContext', 'setExtra', 'flush'] as const
 
 export default defineNuxtModule<ModuleOptions>({
   meta: {
