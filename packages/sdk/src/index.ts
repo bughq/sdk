@@ -96,7 +96,7 @@ export interface BugHQConfig {
   project?: string
   /** Public ingest key. Or provide `dsn`. */
   key?: string
-  /** Ingest host. Defaults to the bughq ingest (localhost during the local-dev phase). */
+  /** Ingest host. Defaults to https://bughq.org; self-hosters override it. */
   host?: string
   /** A DSN encoding host+key+project: `https://<key>@<host>/<project>`. */
   dsn?: string

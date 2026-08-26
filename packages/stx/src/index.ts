@@ -13,7 +13,7 @@ export { default } from './server'
 export interface SnippetOptions {
   project: string
   key: string
-  /** bughq host that serves /sdk.js (localhost during the local-dev phase). */
+  /** Host that serves /sdk.js. Defaults to https://bughq.org; self-hosters override it. */
   host?: string
 }
 
