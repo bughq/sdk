@@ -16,7 +16,11 @@ beforeEach(() => {
 })
 afterEach(() => restoreFetch())
 
-const cfg = { project: 'demo', key: 'k_123', host: 'http://localhost:3108', dedupeMs: 0 }
+// heartbeat off across this suite: it is a real request on construction, so
+// leaving it on makes every "the first call was the error POST" assertion
+// depend on ordering that has nothing to do with what is being tested. The
+// heartbeat has its own test below.
+const cfg = { project: 'demo', key: 'k_123', host: 'http://localhost:3108', dedupeMs: 0, heartbeat: false }
 
 function lastBody(): any {
   return JSON.parse(calls[calls.length - 1].options.body)
@@ -113,7 +117,7 @@ describe('BugHQClient', () => {
   })
 
   test('key alone enables capture (project optional, omitted from payload)', () => {
-    const c = new BugHQClient({ key: 'k' } as any)
+    const c = new BugHQClient({ key: 'k', heartbeat: false } as any)
     c.captureException(new Error('x'))
     expect(calls).toHaveLength(1)
     expect(JSON.parse(calls[0].options.body).project).toBeUndefined()
@@ -269,5 +273,46 @@ describe('top-level report (default client)', () => {
     captureException(new Error('also ignored'))
     await Promise.resolve()
     expect(calls).toHaveLength(0)
+  })
+})
+
+describe('heartbeat', () => {
+  test('checks in once, to /sdk/hello, and not again within the day', () => {
+    const calls: any[] = []
+    ;(globalThis as any).fetch = (url: string, options: any) => {
+      calls.push({ url, options })
+      return Promise.resolve({ ok: true, status: 204 })
+    }
+    // Distinct key so the throttle from any earlier test cannot mask this.
+    const hb = { ...cfg, key: `k_hb_${Math.random()}`, heartbeat: true }
+    // eslint-disable-next-line no-new
+    new BugHQClient(hb)
+    const hello = calls.filter(c => String(c.url).endsWith('/sdk/hello'))
+    expect(hello).toHaveLength(1)
+
+    const body = JSON.parse(hello[0].options.body)
+    expect(body.key).toBe(hb.key)
+    expect(body.sdk?.name).toBeDefined()
+    // Carries no URL, user or session — it says a client exists, nothing more.
+    expect(body.url).toBeUndefined()
+    expect(body.user).toBeUndefined()
+    expect(body.session).toBeUndefined()
+    expect(body.breadcrumbs).toBeUndefined()
+
+    // A second client on the same key inside the window must not re-check-in.
+    // eslint-disable-next-line no-new
+    new BugHQClient(hb)
+    expect(calls.filter(c => String(c.url).endsWith('/sdk/hello'))).toHaveLength(1)
+  })
+
+  test('heartbeat: false sends nothing', () => {
+    const calls: any[] = []
+    ;(globalThis as any).fetch = (url: string) => {
+      calls.push(url)
+      return Promise.resolve({ ok: true, status: 204 })
+    }
+    // eslint-disable-next-line no-new
+    new BugHQClient({ ...cfg, key: `k_off_${Math.random()}`, heartbeat: false })
+    expect(calls.filter(u => String(u).endsWith('/sdk/hello'))).toHaveLength(0)
   })
 })

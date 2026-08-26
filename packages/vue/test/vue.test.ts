@@ -27,7 +27,7 @@ test('install chains errorHandler and captures component errors', () => {
   let previousCalled = false
   app.config.errorHandler = () => { previousCalled = true }
 
-  ;(BugHQ as any).install(app, { project: 'demo', key: 'k', host: 'http://x', dedupeMs: 0 })
+  ;(BugHQ as any).install(app, { project: 'demo', key: 'k', heartbeat: false, host: 'http://x', dedupeMs: 0 })
 
   app.config.errorHandler(new TypeError('vue boom'), { $options: { name: 'Widget' } }, 'render')
 
@@ -42,7 +42,7 @@ test('install chains errorHandler and captures component errors', () => {
 
 test('createBugHQ returns an installable plugin and sets $bughq', () => {
   const app = fakeApp()
-  ;(createBugHQ({ project: 'demo', key: 'k', host: 'http://x' }) as any).install(app)
+  ;(createBugHQ({ project: 'demo', key: 'k', heartbeat: false, host: 'http://x' }) as any).install(app)
   expect(typeof app.config.globalProperties.$bughq.captureException).toBe('function')
 })
 
@@ -50,6 +50,6 @@ test('attachErrorHandler:false leaves the handler untouched', () => {
   const app = fakeApp()
   const original = () => {}
   app.config.errorHandler = original
-  ;(BugHQ as any).install(app, { project: 'demo', key: 'k', host: 'http://x', attachErrorHandler: false })
+  ;(BugHQ as any).install(app, { project: 'demo', key: 'k', heartbeat: false, host: 'http://x', attachErrorHandler: false })
   expect(app.config.errorHandler).toBe(original)
 })

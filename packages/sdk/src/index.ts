@@ -119,6 +119,14 @@ export interface BugHQConfig {
   /** Install `window.onerror` / `unhandledrejection` handlers. Default true. */
   captureUnhandled?: boolean
   /**
+   * Send a once-a-day check-in so bughq can distinguish "this app is healthy"
+   * from "the SDK never loaded". Default true. Carries no URL, user or session,
+   * is never metered, and never creates an issue. Set false to disable, or
+   * sample it yourself on very high-traffic sites — it is one unbilled request
+   * per browser per day.
+   */
+  heartbeat?: boolean
+  /**
    * Browser breadcrumb auto-instrumentation. **Default: all OFF.**
    *
    * Opt-in since d0865bb, because every channel patches a host global
@@ -166,6 +174,7 @@ interface Resolved {
   dedupeMs: number
   maxBreadcrumbs: number
   captureUnhandled: boolean
+  heartbeat: boolean
   autoInstrument: Required<AutoInstrumentOptions>
   ignoreErrors: Array<string | RegExp>
   denyUrls: Array<string | RegExp>
@@ -241,6 +250,7 @@ function resolveConfig(config: BugHQConfig): Resolved {
     dedupeMs: config.dedupeMs ?? 5000,
     maxBreadcrumbs: config.maxBreadcrumbs ?? 30,
     captureUnhandled: config.captureUnhandled !== false,
+    heartbeat: config.heartbeat !== false,
     autoInstrument: resolveAutoInstrument(config.autoInstrument),
     ignoreErrors: config.ignoreErrors ?? [],
     denyUrls: config.denyUrls ?? [],
@@ -386,6 +396,9 @@ function describeElement(el: any): string {
   return out
 }
 
+/** Last heartbeat per key, for runtimes with no localStorage (server SDKs). */
+const heartbeatSent = new Map<string, number>()
+
 export class BugHQClient {
   readonly config: Resolved
   readonly session: { id: string, startedAt: string }
@@ -420,6 +433,68 @@ export class BugHQClient {
       if (this.config.captureUnhandled)
         this.installGlobalHandlers()
       this.installAutoInstrumentation()
+      this.sendHeartbeat()
+    }
+  }
+
+  /**
+   * Tell bughq a client loaded, at most once per browser per day.
+   *
+   * Without this, an empty dashboard is unfalsifiable: a project with no issues
+   * looks exactly the same whether the app is healthy or the SDK never ran —
+   * wrong key, blocked by CORS, a build shipped without the env var. All of
+   * those read as "nothing is broken", which is the most expensive thing an
+   * error tracker can get wrong, because the whole product is the claim that
+   * silence is meaningful.
+   *
+   * Deliberately minimal: no URL, no user, no session, no breadcrumbs. Which
+   * SDK, which version, which environment, which release. The server does not
+   * meter it against the plan's event allowance and answers 204 whatever
+   * happens, so this can never create an issue or confirm whether a key is
+   * valid.
+   *
+   * Every failure path is silent. A heartbeat that broke an app's boot, or
+   * logged noise into a customer's console, would be worse than no heartbeat.
+   */
+  private sendHeartbeat(): void {
+    if (this.config.heartbeat === false)
+      return
+    const g = root()
+    if (!g?.fetch)
+      return
+    try {
+      // One per browser per day. localStorage rather than a cookie: this is not
+      // sent anywhere, it only suppresses a repeat, and a cookie would ride on
+      // every request to the customer's own origin for no reason.
+      const stamp = `bughq.hb.${this.config.key}`
+      // localStorage where it exists, an in-process map where it does not. A
+      // server SDK has no localStorage, and without the fallback the throttle
+      // silently never applied — every init() would have sent one.
+      const stored = Number(g.localStorage?.getItem?.(stamp) ?? 0)
+      const last = stored || heartbeatSent.get(stamp) || 0
+      if (last && Date.now() - last < 86_400_000)
+        return
+      heartbeatSent.set(stamp, Date.now())
+      try {
+        g.localStorage?.setItem?.(stamp, String(Date.now()))
+      }
+      catch { /* storage disabled or full; the in-process map still throttles */ }
+
+      g.fetch(`${this.config.host}/sdk/hello`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          key: this.config.key,
+          sdk: { name: this.config.sdkName, version: SDK_VERSION },
+          environment: this.config.environment,
+          release: this.config.release,
+        }),
+        keepalive: true,
+      }).catch(() => {})
+    }
+    catch {
+      // localStorage can throw outright in private mode or with storage
+      // disabled. Losing a heartbeat is not worth a single broken page.
     }
   }
 

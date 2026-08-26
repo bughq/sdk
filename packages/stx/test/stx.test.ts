@@ -21,7 +21,7 @@ test('clientSnippet builds the tracking script tag', () => {
 })
 
 test('server init + captureException POSTs with a User-Agent header', () => {
-  init({ project: 'demo', key: 'k', host: 'http://localhost:3108', captureUnhandled: false, dedupeMs: 0 })
+  init({ project: 'demo', key: 'k', heartbeat: false, host: 'http://localhost:3108', captureUnhandled: false, dedupeMs: 0 })
   captureException(new RangeError('server boom'))
   expect(calls).toHaveLength(1)
   const opts = calls[0].options
@@ -36,13 +36,13 @@ test('server init + captureException POSTs with a User-Agent header', () => {
 
 test('captureUnhandled:false does not add a process listener', () => {
   const before = process.listenerCount('unhandledRejection')
-  init({ project: 'demo', key: 'k', host: 'http://x', captureUnhandled: false })
+  init({ project: 'demo', key: 'k', heartbeat: false, host: 'http://x', captureUnhandled: false })
   expect(process.listenerCount('unhandledRejection')).toBe(before)
 })
 
 test('captureUnhandled (default) installs and close() removes handlers', () => {
   const before = process.listenerCount('unhandledRejection')
-  init({ project: 'demo', key: 'k', host: 'http://x' })
+  init({ project: 'demo', key: 'k', heartbeat: false, host: 'http://x' })
   expect(process.listenerCount('unhandledRejection')).toBe(before + 1)
   close()
   expect(process.listenerCount('unhandledRejection')).toBe(before)
