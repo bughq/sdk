@@ -1,12 +1,28 @@
 <script server>
 // bughq client tracking partial for stx / Stacks apps. Copy into your
-// resources/ and include it in a layout (e.g. before </body>). Reads the
-// project id + public ingest key from env; swap for your own config source.
-const project = (typeof process !== 'undefined' && process.env.BUGHQ_PROJECT) || ''
+// resources/ and include it in a layout (e.g. before the closing body tag).
+//
+// BUGHQ_KEY is the only variable you need — the ingest key alone identifies
+// the project. BUGHQ_PROJECT is optional and almost always unnecessary; set it
+// only if you have a reason, and only to a real project id, because a wrong id
+// makes the server answer `404 unknown project` without ever checking the key.
 const key = (typeof process !== 'undefined' && process.env.BUGHQ_KEY) || ''
+const project = (typeof process !== 'undefined' && process.env.BUGHQ_PROJECT) || ''
 const host = ((typeof process !== 'undefined' && process.env.BUGHQ_HOST) || 'https://bughq.org').replace(/\/+$/, '')
 </script>
 
-@if (project && key)
-  <script src="{{ host }}/sdk.js" data-project="{{ project }}" data-key="{{ key }}"></script>
+{{-- Gated on `key` ALONE. Requiring a project id here renders nothing at all --}}
+{{-- for the documented key-only install: no tag, no comment, nothing in --}}
+{{-- view-source, and so no way to tell a silent misconfiguration from an app --}}
+{{-- that simply has no errors. --}}
+{{-- --}}
+{{-- The path is `/api/sdk.js`, never a bare `/sdk.js`: the public origin --}}
+{{-- routes `/api/*` to the ingest server and every other GET to the web app, --}}
+{{-- so the bare path returns a 404 HTML document the browser refuses to run. --}}
+@if (key)
+  @if (project)
+    <script src="{{ host }}/api/sdk.js" data-project="{{ project }}" data-key="{{ key }}"></script>
+  @else
+    <script src="{{ host }}/api/sdk.js" data-key="{{ key }}"></script>
+  @endif
 @endif

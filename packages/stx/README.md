@@ -19,7 +19,6 @@ try/catch). Process handlers catch anything uncaught as a safety net.
 import { init, captureException } from '@bughq/stx'
 
 init({
-  project: 'acme-web-9f2c1a',
   key: 'your-public-ingest-key',
   environment: 'production',
   // captureUnhandled: true (default) — also reports uncaughtException / unhandledRejection
@@ -37,14 +36,18 @@ block:
 ```stx
 <script server>
 import { clientSnippet } from '@bughq/stx'
-const bughqTag = clientSnippet({ project: 'acme-web-9f2c1a', key: 'your-public-ingest-key' })
+const bughqTag = clientSnippet({ key: 'your-public-ingest-key' })
 </script>
 {!! bughqTag !!}
 ```
 
 …or copy the ready-made partial shipped at `@bughq/stx/BugHQ.stx` into your
-`resources/` and include it (it reads `BUGHQ_PROJECT` / `BUGHQ_KEY` / `BUGHQ_HOST`
-from env).
+`resources/` and include it. It reads `BUGHQ_KEY` from env — that is the only
+variable it needs — plus the optional `BUGHQ_HOST` and `BUGHQ_PROJECT`.
 
-The ingest key is public (safe in client code). For richer client capture you can
-also use [`@bughq/sdk`](../sdk) directly.
+The ingest key is public (safe in client code) and identifies the project on its
+own. A `project` id is optional everywhere in this package; set it only if you
+have a reason, and only to a real id, because the ingest resolves an id ahead of
+the key and answers `404 unknown project` for one that doesn't match.
+
+For richer client capture you can also use [`@bughq/sdk`](../sdk) directly.
