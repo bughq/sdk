@@ -17,7 +17,7 @@
     },
     "packages/nuxt": {
       "name": "@bughq/nuxt",
-      "version": "0.1.0",
+      "version": "0.2.1",
       "dependencies": {
         "@bughq/sdk": "workspace:*",
         "@nuxt/kit": "^3.14.0",
@@ -32,15 +32,33 @@
     },
     "packages/sdk": {
       "name": "@bughq/sdk",
-      "version": "0.1.0",
+      "version": "0.2.1",
       "devDependencies": {
         "tsup": "^8.3.5",
         "typescript": "^5.7.2",
       },
     },
+    "packages/stacks": {
+      "name": "@bughq/stacks",
+      "version": "0.2.1",
+      "dependencies": {
+        "@bughq/sdk": "workspace:*",
+      },
+      "devDependencies": {
+        "@types/node": "^22.10.2",
+        "tsup": "^8.3.5",
+        "typescript": "^5.7.2",
+      },
+      "peerDependencies": {
+        "@stacksjs/logging": ">=0.72.76",
+      },
+      "optionalPeers": [
+        "@stacksjs/logging",
+      ],
+    },
     "packages/stx": {
       "name": "@bughq/stx",
-      "version": "0.1.0",
+      "version": "0.2.1",
       "dependencies": {
         "@bughq/sdk": "workspace:*",
       },
@@ -52,7 +70,7 @@
     },
     "packages/vue": {
       "name": "@bughq/vue",
-      "version": "0.1.0",
+      "version": "0.2.1",
       "dependencies": {
         "@bughq/sdk": "workspace:*",
       },
@@ -124,6 +142,8 @@
     "@bughq/nuxt": ["@bughq/nuxt@workspace:packages/nuxt"],
 
     "@bughq/sdk": ["@bughq/sdk@workspace:packages/sdk"],
+
+    "@bughq/stacks": ["@bughq/stacks@workspace:packages/stacks"],
 
     "@bughq/stx": ["@bughq/stx@workspace:packages/stx"],
 

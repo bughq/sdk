@@ -1,7 +1,7 @@
 import { $ } from 'bun'
 
 // Build sdk first — vue/nuxt/stx generate their .d.ts against its built types.
-const order = ['sdk', 'vue', 'nuxt', 'stx']
+const order = ['sdk', 'vue', 'nuxt', 'stx', 'stacks']
 
 for (const name of order) {
   console.info(`\n▸ building @bughq/${name}`)
