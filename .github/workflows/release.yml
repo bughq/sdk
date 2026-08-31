@@ -54,28 +54,69 @@ jobs:
       # concrete versions, topo-orders, skips already-published. Authenticates
       # via npm trusted publishing (OIDC; id-token: write above), falling back
       # to NPM_TOKEN outside OIDC.
+      # `continue-on-error` because this step's own verdict is not trustworthy.
+      # On v0.2.1 and v0.2.2 it reported "Published 2/5 packages (3 failed)"
+      # while npm's publish timestamps show all five landed — the three it
+      # counted as failed were accepted seconds after it gave up on them. It
+      # reports a 403 from token auth (after OIDC declines, because trusted
+      # publishing is not configured for the @bughq scope) and then the publish
+      # goes through anyway.
+      #
+      # A step that says "failed" when it worked is worse than no check: it
+      # trains you to ignore a red release, and a real failure then looks
+      # identical. So the tally is downgraded to a signal, and the verification
+      # below — did the artifacts actually land and install? — is the verdict.
       - name: Publish
+        id: publish
+        continue-on-error: true
         run: pantry publish --npm --access public --ignore-scripts 'packages/*'
         env:
           NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
 
-      # Publishing succeeded is not enough — verify the public artifact installs
-      # from a clean, non-workspace dir (catches a lingering workspace:* protocol
-      # in the published manifest).
+      # The real gate. Runs even when the publish step reports failure, and
+      # covers EVERY publishable package rather than a sample of two, so a
+      # package that genuinely did not publish still fails the release.
+      # Installing from a clean, non-workspace dir also catches a lingering
+      # workspace:* protocol in a published manifest.
       - name: Verify published install
+        if: always()
         run: |
           version="${GITHUB_REF#refs/tags/v}"
+
+          pkgs=""
+          for dir in packages/*/; do
+            pkg="${dir}package.json"
+            [ -f "$pkg" ] || continue
+            grep -q '"private": *true' "$pkg" && continue
+            name="$(bun -e "console.log(require('./${pkg}').name)")"
+            pkgs="${pkgs} ${name}@${version}"
+          done
+          echo "verifying:${pkgs}"
+
           smoke_dir="$(mktemp -d)"
           trap 'rm -rf "$smoke_dir"' EXIT
           cd "$smoke_dir"
           echo '{"name":"bughq-release-smoke","private":true}' > package.json
-          for attempt in 1 2 3 4 5 6; do
-            if bun add "@bughq/nuxt@${version}" "@bughq/sdk@${version}" --no-save 2>/dev/null; then
-              echo "✓ @bughq/nuxt@${version} + @bughq/sdk@${version} install cleanly"
+
+          # Registry indexing lags acceptance — on v0.2.2 the last package was
+          # readable about a minute after the publish step ended — so retry.
+          for attempt in 1 2 3 4 5 6 7 8; do
+            if bun add ${pkgs} --no-save 2>/dev/null; then
+              echo "✓ all published @bughq packages install cleanly at ${version}"
               exit 0
             fi
             echo "install attempt ${attempt} failed (registry eventual consistency); retrying…"
             sleep 15
           done
-          echo "::error::published @bughq packages failed to install from a clean dir"
+          echo "::error::published @bughq packages failed to install from a clean dir at ${version}"
           exit 1
+
+      # Keep the misconfiguration visible without making it fatal. Configuring
+      # trusted publishing for the @bughq scope removes the OIDC decline, the
+      # 403, and this warning — npm links it from the publish log, e.g.
+      # https://www.npmjs.com/package/@bughq/sdk/access
+      - name: Note publish-step failure
+        if: always() && steps.publish.outcome == 'failure'
+        run: |
+          echo "::warning::pantry reported a publish failure but every package verified as installable. \
+          This is the known OIDC-declines-then-403 path; configure npm trusted publishing for @bughq to clear it."
