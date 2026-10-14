@@ -19,7 +19,7 @@
  */
 
 export const SDK_NAME = 'bughq.javascript'
-export const SDK_VERSION = '0.2.0'
+export const SDK_VERSION = '0.3.0'
 
 export type Level = 'fatal' | 'error' | 'warning' | 'info' | 'debug'
 
@@ -178,6 +178,25 @@ export interface BugHQConfig {
   maxRetries?: number
   /** Explicit User-Agent header (server-side clients; browsers set it). */
   userAgent?: string
+  /**
+   * Deliver events yourself instead of POSTing them. Receives the finished
+   * event (no key); return `false` (or throw, or reject) to fall back to the
+   * HTTP transport.
+   *
+   * For hosts that already own a delivery path: a mobile app's native crash
+   * reporter keeps an on-disk outbox that survives the app being killed and
+   * stamps the device's own context, so an event handed to it is never lost
+   * offline (see `@stacksjs/mobile`'s crash reporting).
+   */
+  transport?: (event: BugHQEvent) => boolean | void | Promise<boolean | void>
+  /**
+   * Keep events that could not be sent because the device was offline, and
+   * send them when it is back. Default true where `localStorage` exists.
+   * Stored per key, at most `maxEvents` (default 30, oldest dropped) and for
+   * at most `maxAgeHours` (default 72). Nothing is stored for a 4xx: an event
+   * the server refused once it will refuse again.
+   */
+  offline?: boolean | { maxEvents?: number, maxAgeHours?: number }
   /** Send `contexts.device` / `contexts.page` automatically. Default true. */
   sendDefaultContext?: boolean
   /** Log SDK diagnostics to the console. */
@@ -217,6 +236,8 @@ interface Resolved {
   allowUrls: Array<string | RegExp>
   maxRetries: number
   userAgent?: string
+  transport?: (event: BugHQEvent) => boolean | void | Promise<boolean | void>
+  offline: { enabled: boolean, maxEvents: number, maxAgeMs: number }
   sendDefaultContext: boolean
   debug: boolean
   beforeBreadcrumb?: (crumb: Breadcrumb) => Breadcrumb | null | void
@@ -297,6 +318,12 @@ function resolveConfig(config: BugHQConfig): Resolved {
     allowUrls: config.allowUrls ?? [],
     maxRetries: config.maxRetries ?? 2,
     userAgent: config.userAgent,
+    transport: config.transport,
+    offline: {
+      enabled: config.offline !== false,
+      maxEvents: Math.max(1, (typeof config.offline === 'object' && config.offline.maxEvents) || 30),
+      maxAgeMs: Math.max(1, (typeof config.offline === 'object' && config.offline.maxAgeHours) || 72) * 3_600_000,
+    },
     sendDefaultContext: config.sendDefaultContext !== false,
     debug: !!config.debug,
     beforeBreadcrumb: config.beforeBreadcrumb,
@@ -472,7 +499,9 @@ export class BugHQClient {
 
     // The key is all that's required: it's globally unique, so the ingest
     // resolves the project from it alone (Flare-style). `project` is optional.
-    if (!this.config.key) {
+    // A host transport delivers without the key (a mobile app's native
+    // reporter holds its own), so only a client that POSTs needs one.
+    if (!this.config.key && !this.config.transport) {
       if (this.config.debug)
         console.warn('[bughq] missing key — capture disabled')
       this.config.enabled = false
@@ -482,7 +511,96 @@ export class BugHQClient {
         this.installGlobalHandlers()
       this.installAutoInstrumentation()
       this.sendHeartbeat()
+      this.installOfflineReplay()
     }
+  }
+
+  // --- Offline queue --------------------------------------------------------
+
+  private get queueKey(): string {
+    return `bughq.queue.${this.config.key}`
+  }
+
+  private readQueue(): Array<{ body: string, at: number }> {
+    try {
+      const raw = root().localStorage?.getItem?.(this.queueKey)
+      const list = raw ? JSON.parse(raw) : []
+      return Array.isArray(list) ? list.filter((item: any) => item && typeof item.body === 'string' && typeof item.at === 'number') : []
+    }
+    catch {
+      return []
+    }
+  }
+
+  private writeQueue(list: Array<{ body: string, at: number }>): void {
+    try {
+      const storage = root().localStorage
+      if (!storage?.setItem)
+        return
+      if (list.length)
+        storage.setItem(this.queueKey, JSON.stringify(list))
+      else
+        storage.removeItem?.(this.queueKey)
+    }
+    catch {
+      // Storage full or disabled: the event is lost, as it would have been.
+    }
+  }
+
+  /** Whether this runtime can keep an event for later at all. */
+  private canQueue(): boolean {
+    if (!this.config.offline.enabled || !this.config.key)
+      return false
+    try {
+      return typeof root().localStorage?.setItem === 'function'
+    }
+    catch {
+      return false
+    }
+  }
+
+  /** Keep an event the network refused, to send when the device is back online. */
+  private enqueue(body: string): boolean {
+    if (!this.canQueue())
+      return false
+    const now = Date.now()
+    const list = this.readQueue().filter(item => now - item.at < this.config.offline.maxAgeMs)
+    list.push({ body, at: now })
+    this.writeQueue(list.slice(-this.config.offline.maxEvents))
+    return true
+  }
+
+  /** Events queued earlier (this page or a previous one) go out now. */
+  replayQueued(): void {
+    if (!this.canQueue())
+      return
+    const now = Date.now()
+    const list = this.readQueue().filter(item => now - item.at < this.config.offline.maxAgeMs)
+    if (!list.length) {
+      this.writeQueue([])
+      return
+    }
+    this.writeQueue([])
+    for (const item of list)
+      this.transport(item.body, 0, 'replay')
+  }
+
+  private installOfflineReplay(): void {
+    if (!this.config.offline.enabled)
+      return
+    const w = safeWindow()
+    if (w) {
+      const onOnline = () => this.replayQueued()
+      w.addEventListener('online', onOnline)
+      this.detach.push(() => w.removeEventListener('online', onOnline))
+    }
+    // Whatever a previous page left behind, unless it is still offline.
+    if (root().navigator?.onLine !== false)
+      this.replayQueued()
+  }
+
+  private isOffline(): boolean {
+    return root().navigator?.onLine === false
   }
 
   /**
@@ -505,7 +623,7 @@ export class BugHQClient {
    * logged noise into a customer's console, would be worse than no heartbeat.
    */
   private sendHeartbeat(): void {
-    if (this.config.heartbeat === false)
+    if (this.config.heartbeat === false || !this.config.key)
       return
     const g = root()
     if (!g?.fetch)
@@ -824,6 +942,32 @@ export class BugHQClient {
   // --- Transport ----------------------------------------------------------
 
   private send(event: BugHQEvent): void {
+    // A host-owned transport first (a mobile app's native outbox). Anything
+    // short of a yes falls back to HTTP, so a broken bridge loses nothing.
+    if (this.config.transport) {
+      const fallback = () => this.sendHttp(event)
+      try {
+        const handled = this.config.transport(event)
+        if (handled && typeof (handled as Promise<unknown>).then === 'function') {
+          const pending = (handled as Promise<boolean | void>).then(
+            (ok) => { if (ok === false) fallback() },
+            fallback,
+          )
+          this.inFlight.add(pending)
+          pending.finally(() => this.inFlight.delete(pending))
+          return
+        }
+        if (handled !== false)
+          return
+      }
+      catch {
+        // fall through to HTTP
+      }
+    }
+    this.sendHttp(event)
+  }
+
+  private sendHttp(event: BugHQEvent): void {
     // The ingest key travels in the BODY (`key`), not an `X-BugHQ-Key` header.
     // A custom header forces a CORS preflight, and the ingest's allowed headers
     // (framework-fixed to Content-Type/Authorization) don't include it, so a
@@ -839,6 +983,9 @@ export class BugHQClient {
       // Circular or unserializable payload — drop the rich fields and retry once.
       body = JSON.stringify({ ...payload, extra: null, contexts: undefined, breadcrumbs: undefined })
     }
+    // Known offline: straight to the queue rather than three doomed retries.
+    if (this.isOffline() && this.enqueue(body))
+      return
     this.transport(body, 0, event.type)
   }
 
@@ -882,19 +1029,24 @@ export class BugHQClient {
           else if (this.config.debug)
             (this.rawConsole.info ?? console.info)('[bughq] sent', label, r && r.status)
         },
-        () => this.retry(body, attempt, label),
+        () => this.retry(body, attempt, label, true),
       )
       this.inFlight.add(pending)
       pending.finally(() => this.inFlight.delete(pending))
     }
     catch {
-      this.retry(body, attempt, label)
+      this.retry(body, attempt, label, true)
     }
   }
 
-  private retry(body: string, attempt: number, label: string): void {
-    if (attempt >= this.config.maxRetries)
+  private retry(body: string, attempt: number, label: string, network = false): void {
+    if (attempt >= this.config.maxRetries || (network && this.isOffline())) {
+      // Out of retries on a network failure: keep it for when the device is
+      // back online. A 5xx is the server's problem and is not kept.
+      if (network)
+        this.enqueue(body)
       return
+    }
     const g = root()
     if (typeof g.setTimeout !== 'function') {
       this.transport(body, attempt + 1, label)

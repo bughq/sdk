@@ -479,3 +479,115 @@ describe('reportFailure', () => {
     expect(new Set(fps).size).toBe(2)
   })
 })
+
+describe('transport', () => {
+  test('a host transport receives the finished event, without the key, instead of fetch', async () => {
+    const handed: any[] = []
+    const client = new BugHQClient({ ...cfg, transport: (event) => { handed.push(event); return true } })
+    client.setUser({ id: 967 })
+    client.captureException(new TypeError('boom'))
+    await client.flush()
+    expect(calls).toHaveLength(0)
+    expect(handed).toHaveLength(1)
+    expect(handed[0]).toMatchObject({ type: 'TypeError', message: 'boom', user: { id: 967 } })
+    expect(handed[0].key).toBeUndefined()
+  })
+
+  test('falls back to HTTP when the host transport declines, throws or rejects', async () => {
+    const declines = new BugHQClient({ ...cfg, transport: () => false })
+    declines.captureMessage('one', 'error')
+    const throws = new BugHQClient({ ...cfg, transport: () => { throw new Error('bridge gone') } })
+    throws.captureMessage('two', 'error')
+    const rejects = new BugHQClient({ ...cfg, transport: () => Promise.reject(new Error('no')) })
+    rejects.captureMessage('three', 'error')
+    await rejects.flush()
+    expect(calls.map(c => JSON.parse(c.options.body).message)).toEqual(['one', 'two', 'three'])
+  })
+})
+
+describe('offline queue', () => {
+  let store: Record<string, string>
+  let previousStorage: any
+  let previousNavigator: any
+  beforeEach(() => {
+    store = {}
+    previousStorage = (globalThis as any).localStorage
+    previousNavigator = Object.getOwnPropertyDescriptor(globalThis, 'navigator')
+    ;(globalThis as any).localStorage = {
+      getItem: (k: string) => (k in store ? store[k] : null),
+      setItem: (k: string, v: string) => { store[k] = v },
+      removeItem: (k: string) => { delete store[k] },
+    }
+  })
+  afterEach(() => {
+    if (previousStorage === undefined) delete (globalThis as any).localStorage
+    else (globalThis as any).localStorage = previousStorage
+    if (previousNavigator) Object.defineProperty(globalThis, 'navigator', previousNavigator)
+  })
+  const offline = (value: boolean) => Object.defineProperty(globalThis, 'navigator', { value: { onLine: !value, userAgent: '' }, configurable: true, writable: true })
+
+  test('keeps an event captured while offline and sends it on the next start online', async () => {
+    offline(true)
+    const first = new BugHQClient(cfg)
+    first.captureException(new Error('on the train'))
+    await first.flush()
+    expect(calls).toHaveLength(0)
+    expect(JSON.parse(store['bughq.queue.k_123'])).toHaveLength(1)
+
+    offline(false)
+    const next = new BugHQClient(cfg)
+    await next.flush()
+    expect(calls).toHaveLength(1)
+    expect(lastBody()).toMatchObject({ message: 'on the train', key: 'k_123' })
+    expect(store['bughq.queue.k_123']).toBeUndefined()
+  })
+
+  test('queues after the retries when the network fails, not for a server error', async () => {
+    offline(false)
+    ;(globalThis as any).fetch = mock((url: string, options: any) => {
+      calls.push({ url, options })
+      return Promise.reject(new TypeError('Failed to fetch'))
+    })
+    const client = new BugHQClient({ ...cfg, maxRetries: 0 })
+    client.captureException(new Error('lost signal'))
+    await client.flush()
+    await new Promise(resolve => setTimeout(resolve, 0))
+    expect(JSON.parse(store['bughq.queue.k_123'])[0].body).toContain('lost signal')
+
+    store = {}
+    ;(globalThis as any).fetch = mock((url: string, options: any) => {
+      calls.push({ url, options })
+      return Promise.resolve({ status: 503 })
+    })
+    const server = new BugHQClient({ ...cfg, maxRetries: 0 })
+    server.captureException(new Error('server down'))
+    await server.flush()
+    await new Promise(resolve => setTimeout(resolve, 0))
+    expect(store['bughq.queue.k_123']).toBeUndefined()
+  })
+
+  test('holds at most maxEvents, dropping the oldest, and nothing when turned off', async () => {
+    offline(true)
+    const client = new BugHQClient({ ...cfg, offline: { maxEvents: 2 } })
+    for (const n of [1, 2, 3])
+      client.captureMessage(`event ${n}`, 'error')
+    const queued = JSON.parse(store['bughq.queue.k_123']).map((item: any) => JSON.parse(item.body).message)
+    expect(queued).toEqual(['event 2', 'event 3'])
+
+    store = {}
+    const off = new BugHQClient({ ...cfg, offline: false })
+    off.captureMessage('dropped', 'error')
+    expect(store['bughq.queue.k_123']).toBeUndefined()
+  })
+})
+
+describe('transport without a key', () => {
+  test('a client with a host transport captures with no key and sends no heartbeat', async () => {
+    const handed: any[] = []
+    const client = new BugHQClient({ heartbeat: true, dedupeMs: 0, transport: (event) => { handed.push(event); return true } })
+    client.captureMessage('from a web view in the app', 'error')
+    await client.flush()
+    expect(handed.map(e => e.message)).toEqual(['from a web view in the app'])
+    expect(calls).toHaveLength(0)
+  })
+})

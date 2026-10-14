@@ -48,6 +48,14 @@ bughq.init({ dsn: 'https://<ingest_key>@bughq.org/acme-web-9f2c1a' })
 | `sampleRate` | `1` | Fraction of events to send (0..1). |
 | `dedupeMs` | `5000` | Drop repeats of the same error within this window. |
 | `beforeSend(event)` | — | Inspect/mutate; return `null` to drop. |
+| `offline` | `true` | Keep events the network refused (in `localStorage`, per key) and send them when the device is back online. `{ maxEvents: 30, maxAgeHours: 72 }` to tune, `false` to turn off. A server error is never kept. |
+| `transport(event)` | — | Deliver events yourself. Return `false` (or throw) to fall back to HTTP. A mobile app hands them to its native crash reporter this way, so they share its on-disk outbox (see `@stacksjs/mobile`). |
+
+### Offline
+
+An event captured with no connection (or after the retries fail on a network
+error) is kept and replayed on the browser's `online` event, or on the next page
+load. Kept events carry their original timestamp.
 
 The key is a revocable identifier, not a secret — shipping it in your bundle is by
 design. Note: bughq stores messages/stacks up to 255 chars (full stacks are used
